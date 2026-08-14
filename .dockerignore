@@ -1,0 +1,44 @@
+# Everything the image does not need. The build context is pyproject.toml,
+# README.md (pyproject reads it), src/ and scripts/fetch_model.py — nothing else.
+
+.git
+.gitignore
+.github
+
+.venv
+venv
+env
+
+__pycache__/
+*.py[cod]
+*.so
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+build/
+dist/
+*.egg-info/
+
+tests/
+docs/
+prometheus.yml
+docker-compose.yml
+Dockerfile
+Makefile
+
+# Secrets and local overrides never enter the build context, let alone a layer.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,94 @@
+name: air-sentiment
+
+services:
+  air-sentiment:
+    build:
+      context: .
+      target: runtime
+    image: air-sentiment:local
+    ports:
+      - "${AIR_SENTIMENT_PORT:-8080}:8080"
+    environment:
+      AIR_SENTIMENT__APP__ENV: development
+      AIR_SENTIMENT__OBS__LOG_FORMAT: console
+      AIR_SENTIMENT__OBS__LOG_LEVEL: INFO
+      # Local stack has no key store; every caller is the anonymous identity.
+      AIR_SENTIMENT__SECURITY__ALLOW_UNAUTHENTICATED: "true"
+      AIR_SENTIMENT__PROVIDERS__OLLAMA__BASE_URL: http://ollama:11434
+      AIR_SENTIMENT__CACHE__BACKEND: redis
+      AIR_SENTIMENT__CACHE__REDIS_URL: redis://redis:6379/0
+    # Provider API keys arrive from an untracked .env; `environment:` wins over
+    # `env_file:`, so those keys are deliberately absent above.
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    # Healthcheck comes from the image so the probe cannot drift from the one
+    # a production orchestrator uses.
+
+  ollama:
+    image: ollama/ollama:0.13.0
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: 10m
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - air-sentiment
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
+  prometheus-data:
+  grafana-data:

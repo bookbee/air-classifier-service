@@ -1,0 +1,124 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "air-sentiment"
+version = "0.1.0"
+description = "AIR Sentiment — layered sentiment analysis with cost-aware escalation"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Vikas Roy" }]
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "structlog>=24.4",
+    "httpx>=0.27",
+    "orjson>=3.10",
+    "prometheus-client>=0.21",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.55"]
+redis = ["redis>=5.2"]
+onnx = ["onnxruntime>=1.20", "tokenizers>=0.20", "numpy>=1.26"]
+otel = [
+    "opentelemetry-api>=1.28",
+    "opentelemetry-sdk>=1.28",
+    "opentelemetry-exporter-otlp-proto-http>=1.28",
+    "opentelemetry-instrumentation-fastapi>=0.49b0",
+]
+# Everything a production image needs.
+all = [
+    "air-sentiment[anthropic,openai,redis,onnx,otel]",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "respx>=0.21",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "types-redis>=4.6",
+]
+
+[project.scripts]
+air-sentiment = "air_sentiment.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/air_sentiment"]
+
+# ── Ruff ──────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "N",         # pep8-naming
+    "UP",        # pyupgrade
+    "B",         # bugbear
+    "C4",        # comprehensions
+    "SIM",       # simplify
+    "RUF",       # ruff-specific
+    "ASYNC",     # async correctness
+    "S",         # bandit
+    "T20",       # no print
+]
+ignore = [
+    "S101",    # assert is fine in tests and internal invariants
+    "B008",    # FastAPI Depends() in defaults is the documented idiom
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S311"]
+"scripts/**" = ["T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["air_sentiment"]
+
+# ── mypy ──────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+packages = ["air_sentiment"]
+
+[[tool.mypy.overrides]]
+module = ["onnxruntime.*", "tokenizers.*", "prometheus_client.*"]
+ignore_missing_imports = true
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "integration: requires external services (redis, ollama)",
+    "live: hits a real paid provider API; opt-in only",
+]
+filterwarnings = [
+    # Starlette 1.6 deprecates using `httpx` (vs `httpx2`) with its TestClient;
+    # the warning fires at import of fastapi.testclient in the contract tests.
+    # Third-party and not actionable in our code until httpx2 is adopted upstream.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:Warning",
+]
+
+[tool.coverage.run]
+source = ["src/air_sentiment"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "\\.\\.\\."]

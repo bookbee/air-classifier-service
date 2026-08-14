@@ -1,0 +1,2247 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AIR Sentiment",
+    "description": "Layered sentiment analysis with cost-aware escalation.\n\nEvery request enters at the cheapest rung of a four-tier ladder \u2014 deterministic\nrules, a statistical classifier, a locally served LLM, a metered cloud LLM \u2014 and\nclimbs only as far as the confidence, margin and complexity of the input\nactually require. The rung that decided is reported as `decided_by`, and the\nreasoning is in `escalation_trace`.\n\nA rung being unavailable is not an error. When a tier fails or a provider is\ndown, a lower rung answers and the response carries `degraded: true` with HTTP\n200. The only failure the ladder can surface is `503 no-verdict`, which means\nevery enabled rung declined.\n\nErrors are RFC 9457 `application/problem+json`.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Liveness probe",
+        "description": "Reports that the process is up. Never probes tiers or dependencies.",
+        "operationId": "health_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ready": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Readiness probe",
+        "description": "Probes every enabled tier and the cache backend. Returns 200 for both `ok` and `degraded`; 503 only when no tier can produce a verdict.",
+        "operationId": "ready_v1_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No tier can serve; the pod should leave rotation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Tier inventory and service limits",
+        "description": "What this deployment can do right now: which rungs are enabled and available, their model versions, and the request limits in force.",
+        "operationId": "capabilities_v1_capabilities_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sentiment": {
+      "post": {
+        "tags": [
+          "sentiment"
+        ],
+        "summary": "Analyse one piece of text",
+        "description": "Runs the escalation ladder over a single text and returns the verdict, the rung that decided it, and \u2014 unless suppressed via `options.include_trace` \u2014 why the ladder climbed as far as it did.",
+        "operationId": "analyse_sentiment_v1_sentiment_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SentimentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SentimentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unparseable body, or a payload above the configured size cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `X-API-Key` header was supplied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key is unknown, lacks the scope, or forbids the requested options.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`Idempotency-Key` was reused with a different request body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Schema validation failed, or the batch exceeded `max_batch_items`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Quota exhausted for this key. Carries `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unhandled defect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Every enabled tier failed to produce a usable verdict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sentiment/batch": {
+      "post": {
+        "tags": [
+          "sentiment"
+        ],
+        "summary": "Analyse many texts in one call",
+        "description": "Analyses every item concurrently, bounded by `app.batch_concurrency`. A failing item yields a problem document in its own slot while its siblings still return results, so the call is never all-or-nothing.",
+        "operationId": "analyse_sentiment_batch_v1_sentiment_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchRequest_SentimentRequest_"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResponse_SentimentResponse_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unparseable body, or a payload above the configured size cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `X-API-Key` header was supplied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key is unknown, lacks the scope, or forbids the requested options.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`Idempotency-Key` was reused with a different request body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Schema validation failed, or the batch exceeded `max_batch_items`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Quota exhausted for this key. Carries `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unhandled defect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Every enabled tier failed to produce a usable verdict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/feedback": {
+      "post": {
+        "tags": [
+          "feedback"
+        ],
+        "summary": "Analyse one piece of user feedback",
+        "description": "Sentiment plus triage signals for a single feedback item. `urgency`, `actionability` and `suggested_route` are deterministic heuristics computed from the verdict, a fixed cue vocabulary and the `channel` \u2014 they are not model output. Use them to order a queue, not as evidence.",
+        "operationId": "analyse_feedback_v1_feedback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unparseable body, or a payload above the configured size cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `X-API-Key` header was supplied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key is unknown, lacks the scope, or forbids the requested options.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`Idempotency-Key` was reused with a different request body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Schema validation failed, or the batch exceeded `max_batch_items`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Quota exhausted for this key. Carries `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unhandled defect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Every enabled tier failed to produce a usable verdict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/feedback/batch": {
+      "post": {
+        "tags": [
+          "feedback"
+        ],
+        "summary": "Analyse many feedback items in one call",
+        "description": "Analyses every item concurrently, bounded by `app.batch_concurrency`. A failing item yields a problem document in its own slot while its siblings still return results. `urgency`, `actionability` and `suggested_route` are deterministic heuristics computed from the verdict, a fixed cue vocabulary and the `channel` \u2014 they are not model output. Use them to order a queue, not as evidence.",
+        "operationId": "analyse_feedback_batch_v1_feedback_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchRequest_FeedbackRequest_"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResponse_FeedbackResponse_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unparseable body, or a payload above the configured size cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `X-API-Key` header was supplied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key is unknown, lacks the scope, or forbids the requested options.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`Idempotency-Key` was reused with a different request body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Schema validation failed, or the batch exceeded `max_batch_items`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Quota exhausted for this key. Carries `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unhandled defect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Every enabled tier failed to produce a usable verdict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/reviews": {
+      "post": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Analyse one product review",
+        "description": "Sentiment and aspects for a single review. `rating_consistency` is null when the request carried no `rating`; otherwise it reports `agrees`, `prose_more_positive` or `prose_more_negative` with the signed delta on the -1..+1 scale.",
+        "operationId": "analyse_review_v1_reviews_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unparseable body, or a payload above the configured size cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `X-API-Key` header was supplied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key is unknown, lacks the scope, or forbids the requested options.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`Idempotency-Key` was reused with a different request body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Schema validation failed, or the batch exceeded `max_batch_items`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Quota exhausted for this key. Carries `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unhandled defect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Every enabled tier failed to produce a usable verdict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/reviews/batch": {
+      "post": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Analyse many reviews in one call",
+        "description": "Analyses every item concurrently, bounded by `app.batch_concurrency`. A failing item yields a problem document in its own slot while its siblings still return results. `rating_consistency` is null when the request carried no `rating`; otherwise it reports `agrees`, `prose_more_positive` or `prose_more_negative` with the signed delta on the -1..+1 scale.",
+        "operationId": "analyse_reviews_batch_v1_reviews_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchRequest_ReviewRequest_"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResponse_ReviewResponse_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unparseable body, or a payload above the configured size cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `X-API-Key` header was supplied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key is unknown, lacks the scope, or forbids the requested options.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`Idempotency-Key` was reused with a different request body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Schema validation failed, or the batch exceeded `max_batch_items`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Quota exhausted for this key. Carries `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unhandled defect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Every enabled tier failed to produce a usable verdict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Actionability": {
+        "type": "string",
+        "enum": [
+          "none",
+          "informational",
+          "actionable",
+          "blocking"
+        ],
+        "title": "Actionability",
+        "description": "Whether feedback implies work."
+      },
+      "Aspect": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "label": {
+            "$ref": "#/components/schemas/Label"
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 280
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "label",
+          "confidence"
+        ],
+        "title": "Aspect",
+        "description": "Sentiment toward one named facet of the subject."
+      },
+      "BatchItemResult_FeedbackResponse_": {
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Index"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FeedbackResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProblemDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "index",
+          "ok"
+        ],
+        "title": "BatchItemResult[FeedbackResponse]"
+      },
+      "BatchItemResult_ReviewResponse_": {
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Index"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProblemDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "index",
+          "ok"
+        ],
+        "title": "BatchItemResult[ReviewResponse]"
+      },
+      "BatchItemResult_SentimentResponse_": {
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Index"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SentimentResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProblemDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "index",
+          "ok"
+        ],
+        "title": "BatchItemResult[SentimentResponse]"
+      },
+      "BatchRequest_FeedbackRequest_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FeedbackRequest"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Items"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Options"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Applied to items that did not specify their own."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "BatchRequest[FeedbackRequest]"
+      },
+      "BatchRequest_ReviewRequest_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewRequest"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Items"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Options"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Applied to items that did not specify their own."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "BatchRequest[ReviewRequest]"
+      },
+      "BatchRequest_SentimentRequest_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SentimentRequest"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Items"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Options"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Applied to items that did not specify their own."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "BatchRequest[SentimentRequest]"
+      },
+      "BatchResponse_FeedbackResponse_": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BatchItemResult_FeedbackResponse_"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "succeeded": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Succeeded"
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Failed"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/RequestUsage"
+          },
+          "latency_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Latency Ms",
+            "default": 0.0
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "items",
+          "succeeded",
+          "failed"
+        ],
+        "title": "BatchResponse[FeedbackResponse]"
+      },
+      "BatchResponse_ReviewResponse_": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BatchItemResult_ReviewResponse_"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "succeeded": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Succeeded"
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Failed"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/RequestUsage"
+          },
+          "latency_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Latency Ms",
+            "default": 0.0
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "items",
+          "succeeded",
+          "failed"
+        ],
+        "title": "BatchResponse[ReviewResponse]"
+      },
+      "BatchResponse_SentimentResponse_": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BatchItemResult_SentimentResponse_"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "succeeded": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Succeeded"
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Failed"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/RequestUsage"
+          },
+          "latency_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Latency Ms",
+            "default": 0.0
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "items",
+          "succeeded",
+          "failed"
+        ],
+        "title": "BatchResponse[SentimentResponse]"
+      },
+      "CapabilitiesResponse": {
+        "properties": {
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "tiers": {
+            "items": {
+              "$ref": "#/components/schemas/TierCapability"
+            },
+            "type": "array",
+            "title": "Tiers"
+          },
+          "supported_languages": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Supported Languages"
+          },
+          "max_batch_items": {
+            "type": "integer",
+            "title": "Max Batch Items"
+          },
+          "max_text_chars": {
+            "type": "integer",
+            "title": "Max Text Chars"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "version",
+          "tiers",
+          "supported_languages",
+          "max_batch_items",
+          "max_text_chars"
+        ],
+        "title": "CapabilitiesResponse"
+      },
+      "Emotion": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "score": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "score"
+        ],
+        "title": "Emotion",
+        "description": "A named affect with an intensity."
+      },
+      "EscalationStep": {
+        "properties": {
+          "tier": {
+            "$ref": "#/components/schemas/Tier"
+          },
+          "label": {
+            "$ref": "#/components/schemas/Label"
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          },
+          "latency_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Latency Ms"
+          },
+          "succeeded": {
+            "type": "boolean",
+            "title": "Succeeded",
+            "default": true
+          },
+          "escalated_because": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escalated Because",
+            "description": "Comma-joined reason codes; null means this rung was terminal."
+          }
+        },
+        "type": "object",
+        "required": [
+          "tier",
+          "label",
+          "confidence",
+          "latency_ms"
+        ],
+        "title": "EscalationStep",
+        "description": "One row of the trace returned to the caller."
+      },
+      "FeedbackRequest": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "description": "The text to analyse."
+          },
+          "context": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Context",
+            "description": "Situational context (locale, channel, product). Available to rules."
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata",
+            "description": "Caller-defined key/values. Echoed back; never interpreted."
+          },
+          "options": {
+            "$ref": "#/components/schemas/Options"
+          },
+          "channel": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Channel",
+            "description": "app | email | support | survey | ..."
+          },
+          "user_segment": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Segment"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "FeedbackRequest",
+        "description": "User feedback, which additionally gets urgency and routing analysis."
+      },
+      "FeedbackResponse": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "sentiment": {
+            "$ref": "#/components/schemas/SentimentResult"
+          },
+          "emotions": {
+            "items": {
+              "$ref": "#/components/schemas/Emotion"
+            },
+            "type": "array",
+            "title": "Emotions"
+          },
+          "aspects": {
+            "items": {
+              "$ref": "#/components/schemas/Aspect"
+            },
+            "type": "array",
+            "title": "Aspects"
+          },
+          "language": {
+            "$ref": "#/components/schemas/LanguageInfo"
+          },
+          "decided_by": {
+            "$ref": "#/components/schemas/Tier",
+            "description": "The rung whose verdict was returned."
+          },
+          "degraded": {
+            "type": "boolean",
+            "title": "Degraded",
+            "description": "True when a tier failed and a lower rung's answer was used instead.",
+            "default": false
+          },
+          "escalation_trace": {
+            "items": {
+              "$ref": "#/components/schemas/EscalationStep"
+            },
+            "type": "array",
+            "title": "Escalation Trace",
+            "description": "Why the ladder climbed as far as it did. Suppressible via options."
+          },
+          "safety": {
+            "$ref": "#/components/schemas/SafetyReport"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/RequestUsage"
+          },
+          "cached": {
+            "type": "boolean",
+            "title": "Cached",
+            "default": false
+          },
+          "latency_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Latency Ms",
+            "default": 0.0
+          },
+          "model_versions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Model Versions"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata",
+            "description": "Echoed back from the request, unmodified."
+          },
+          "urgency": {
+            "$ref": "#/components/schemas/Urgency",
+            "default": "low"
+          },
+          "actionability": {
+            "$ref": "#/components/schemas/Actionability",
+            "default": "informational"
+          },
+          "suggested_route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggested Route",
+            "description": "Team or queue implied by the content, when inferable."
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "sentiment",
+          "language",
+          "decided_by"
+        ],
+        "title": "FeedbackResponse",
+        "description": "Feedback result, with triage signals."
+      },
+      "FieldError": {
+        "properties": {
+          "field": {
+            "type": "string",
+            "title": "Field"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "field",
+          "code"
+        ],
+        "title": "FieldError",
+        "description": "One field-level validation failure."
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "ok"
+          },
+          "service": {
+            "type": "string",
+            "title": "Service",
+            "default": "air-sentiment"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "HealthResponse"
+      },
+      "Label": {
+        "type": "string",
+        "enum": [
+          "positive",
+          "negative",
+          "neutral",
+          "mixed",
+          "unknown"
+        ],
+        "title": "Label",
+        "description": "Sentiment labels.\n\nUNKNOWN is not a classification \u2014 it is what a tier returns when it declines\nto judge, and it always escalates."
+      },
+      "LanguageInfo": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "ISO 639-1 code, or 'und' when undetermined."
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "confidence"
+        ],
+        "title": "LanguageInfo",
+        "description": "Detected language of the input."
+      },
+      "Options": {
+        "properties": {
+          "min_tier": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Tier"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Force the ladder to reach at least this rung."
+          },
+          "max_tier": {
+            "$ref": "#/components/schemas/Tier",
+            "description": "Hard ceiling; also a privacy and cost lever.",
+            "default": "t3_cloud_llm"
+          },
+          "latency_budget_ms": {
+            "type": "integer",
+            "maximum": 30000.0,
+            "minimum": 50.0,
+            "title": "Latency Budget Ms",
+            "default": 8000
+          },
+          "max_cost_usd": {
+            "type": "number",
+            "maximum": 10.0,
+            "minimum": 0.0,
+            "title": "Max Cost Usd",
+            "default": 0.05
+          },
+          "include_trace": {
+            "type": "boolean",
+            "title": "Include Trace",
+            "default": true
+          },
+          "redact_pii": {
+            "type": "boolean",
+            "title": "Redact Pii",
+            "default": true
+          },
+          "aspects": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 20
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aspects",
+            "description": "Aspects to score explicitly (reviews)."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Options",
+        "description": "Per-request controls over the ladder.\n\n``model_fields_set`` is load-bearing here: the API needs to distinguish\n\"caller explicitly asked for redact_pii=false\" from \"caller said nothing and\ngot the default\", because an API key carrying ``force_pii_redaction``\nrejects the former and silently permits the latter."
+      },
+      "PIIFinding": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/PIIKind"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "count"
+        ],
+        "title": "PIIFinding"
+      },
+      "PIIKind": {
+        "type": "string",
+        "enum": [
+          "email",
+          "phone",
+          "credit_card",
+          "national_id",
+          "ip_address",
+          "url_credentials"
+        ],
+        "title": "PIIKind",
+        "description": "Categories the redactor recognises."
+      },
+      "ProblemDetail": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "Absolute URI identifying the problem class."
+          },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "description": "Short, human-readable, stable across occurrences."
+          },
+          "status": {
+            "type": "integer",
+            "maximum": 599.0,
+            "minimum": 100.0,
+            "title": "Status"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail",
+            "description": "Explanation specific to this occurrence."
+          },
+          "instance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance",
+            "description": "URI of the specific occurrence."
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            },
+            "type": "array",
+            "title": "Errors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status"
+        ],
+        "title": "ProblemDetail",
+        "description": "An RFC 9457 `application/problem+json` body."
+      },
+      "RatingAgreement": {
+        "type": "string",
+        "enum": [
+          "agrees",
+          "prose_more_positive",
+          "prose_more_negative"
+        ],
+        "title": "RatingAgreement",
+        "description": "Whether a review's prose matches its star rating."
+      },
+      "RatingConsistency": {
+        "properties": {
+          "agreement": {
+            "$ref": "#/components/schemas/RatingAgreement"
+          },
+          "delta": {
+            "type": "number",
+            "maximum": 2.0,
+            "minimum": -2.0,
+            "title": "Delta"
+          },
+          "normalised_rating": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": -1.0,
+            "title": "Normalised Rating"
+          }
+        },
+        "type": "object",
+        "required": [
+          "agreement",
+          "delta",
+          "normalised_rating"
+        ],
+        "title": "RatingConsistency",
+        "description": "Whether a review's prose matches the stars it carries."
+      },
+      "ReadyComponent": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "ready": {
+            "type": "boolean",
+            "title": "Ready"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "ready"
+        ],
+        "title": "ReadyComponent"
+      },
+      "ReadyResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "components": {
+            "items": {
+              "$ref": "#/components/schemas/ReadyComponent"
+            },
+            "type": "array",
+            "title": "Components"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "components"
+        ],
+        "title": "ReadyResponse",
+        "description": "Readiness.\n\n``status`` is ``degraded`` \u2014 not ``not_ready`` \u2014 when an upper tier is down\nbut a lower one can still answer. Taking the pod out of rotation for a cloud\noutage would be exactly the wrong reaction."
+      },
+      "RequestUsage": {
+        "properties": {
+          "tiers_run": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Tiers Run",
+            "default": 0
+          },
+          "tokens_in": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Tokens In",
+            "default": 0
+          },
+          "tokens_out": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Tokens Out",
+            "default": 0
+          },
+          "cache_read_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Cache Read Tokens",
+            "default": 0
+          },
+          "est_cost_usd": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Est Cost Usd",
+            "default": 0.0
+          }
+        },
+        "type": "object",
+        "title": "RequestUsage",
+        "description": "Roll-up across every tier that ran."
+      },
+      "ReviewRequest": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "description": "The text to analyse."
+          },
+          "context": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Context",
+            "description": "Situational context (locale, channel, product). Available to rules."
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata",
+            "description": "Caller-defined key/values. Echoed back; never interpreted."
+          },
+          "options": {
+            "$ref": "#/components/schemas/Options"
+          },
+          "rating": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rating",
+            "description": "Stars as given by the author."
+          },
+          "rating_scale_max": {
+            "type": "number",
+            "maximum": 100.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Rating Scale Max",
+            "default": 5.0
+          },
+          "product_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Id"
+          },
+          "verified_purchase": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified Purchase"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "ReviewRequest",
+        "description": "A product review, which additionally gets aspects and rating consistency."
+      },
+      "ReviewResponse": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "sentiment": {
+            "$ref": "#/components/schemas/SentimentResult"
+          },
+          "emotions": {
+            "items": {
+              "$ref": "#/components/schemas/Emotion"
+            },
+            "type": "array",
+            "title": "Emotions"
+          },
+          "aspects": {
+            "items": {
+              "$ref": "#/components/schemas/Aspect"
+            },
+            "type": "array",
+            "title": "Aspects"
+          },
+          "language": {
+            "$ref": "#/components/schemas/LanguageInfo"
+          },
+          "decided_by": {
+            "$ref": "#/components/schemas/Tier",
+            "description": "The rung whose verdict was returned."
+          },
+          "degraded": {
+            "type": "boolean",
+            "title": "Degraded",
+            "description": "True when a tier failed and a lower rung's answer was used instead.",
+            "default": false
+          },
+          "escalation_trace": {
+            "items": {
+              "$ref": "#/components/schemas/EscalationStep"
+            },
+            "type": "array",
+            "title": "Escalation Trace",
+            "description": "Why the ladder climbed as far as it did. Suppressible via options."
+          },
+          "safety": {
+            "$ref": "#/components/schemas/SafetyReport"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/RequestUsage"
+          },
+          "cached": {
+            "type": "boolean",
+            "title": "Cached",
+            "default": false
+          },
+          "latency_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Latency Ms",
+            "default": 0.0
+          },
+          "model_versions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Model Versions"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata",
+            "description": "Echoed back from the request, unmodified."
+          },
+          "rating_consistency": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RatingConsistency"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null when the request carried no rating."
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "sentiment",
+          "language",
+          "decided_by"
+        ],
+        "title": "ReviewResponse",
+        "description": "Review result, with rating cross-check."
+      },
+      "SafetyReport": {
+        "properties": {
+          "pii_redacted": {
+            "type": "boolean",
+            "title": "Pii Redacted",
+            "default": false
+          },
+          "pii_findings": {
+            "items": {
+              "$ref": "#/components/schemas/PIIFinding"
+            },
+            "type": "array",
+            "title": "Pii Findings"
+          },
+          "flagged": {
+            "type": "boolean",
+            "title": "Flagged",
+            "default": false
+          },
+          "flag_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flag Reason"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "SafetyReport",
+        "description": "What preprocessing did to the text before any tier saw it."
+      },
+      "SentimentRequest": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "description": "The text to analyse."
+          },
+          "context": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Context",
+            "description": "Situational context (locale, channel, product). Available to rules."
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata",
+            "description": "Caller-defined key/values. Echoed back; never interpreted."
+          },
+          "options": {
+            "$ref": "#/components/schemas/Options"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "SentimentRequest",
+        "description": "Generic text with no domain assumptions."
+      },
+      "SentimentResponse": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "sentiment": {
+            "$ref": "#/components/schemas/SentimentResult"
+          },
+          "emotions": {
+            "items": {
+              "$ref": "#/components/schemas/Emotion"
+            },
+            "type": "array",
+            "title": "Emotions"
+          },
+          "aspects": {
+            "items": {
+              "$ref": "#/components/schemas/Aspect"
+            },
+            "type": "array",
+            "title": "Aspects"
+          },
+          "language": {
+            "$ref": "#/components/schemas/LanguageInfo"
+          },
+          "decided_by": {
+            "$ref": "#/components/schemas/Tier",
+            "description": "The rung whose verdict was returned."
+          },
+          "degraded": {
+            "type": "boolean",
+            "title": "Degraded",
+            "description": "True when a tier failed and a lower rung's answer was used instead.",
+            "default": false
+          },
+          "escalation_trace": {
+            "items": {
+              "$ref": "#/components/schemas/EscalationStep"
+            },
+            "type": "array",
+            "title": "Escalation Trace",
+            "description": "Why the ladder climbed as far as it did. Suppressible via options."
+          },
+          "safety": {
+            "$ref": "#/components/schemas/SafetyReport"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/RequestUsage"
+          },
+          "cached": {
+            "type": "boolean",
+            "title": "Cached",
+            "default": false
+          },
+          "latency_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Latency Ms",
+            "default": 0.0
+          },
+          "model_versions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Model Versions"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata",
+            "description": "Echoed back from the request, unmodified."
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "sentiment",
+          "language",
+          "decided_by"
+        ],
+        "title": "SentimentResponse",
+        "description": "Generic text result."
+      },
+      "SentimentResult": {
+        "properties": {
+          "label": {
+            "$ref": "#/components/schemas/Label"
+          },
+          "polarity": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": -1.0,
+            "title": "Polarity",
+            "description": "Continuous valence: -1 fully negative, +1 fully positive."
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          },
+          "rationale": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rationale"
+          }
+        },
+        "type": "object",
+        "required": [
+          "label",
+          "polarity",
+          "confidence"
+        ],
+        "title": "SentimentResult",
+        "description": "The core judgement every tier produces."
+      },
+      "Tier": {
+        "type": "string",
+        "enum": [
+          "t0_rules",
+          "t1_classifier",
+          "t2_local_llm",
+          "t3_cloud_llm"
+        ],
+        "title": "Tier",
+        "description": "The rungs of the escalation ladder, cheapest first."
+      },
+      "TierCapability": {
+        "properties": {
+          "tier": {
+            "$ref": "#/components/schemas/Tier"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "available": {
+            "type": "boolean",
+            "title": "Available"
+          },
+          "model_version": {
+            "type": "string",
+            "title": "Model Version"
+          },
+          "detail": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tier",
+          "enabled",
+          "available",
+          "model_version"
+        ],
+        "title": "TierCapability"
+      },
+      "Urgency": {
+        "type": "string",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "critical"
+        ],
+        "title": "Urgency",
+        "description": "How soon a piece of feedback needs a human."
+      }
+    }
+  }
+}
