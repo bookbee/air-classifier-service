@@ -41,14 +41,14 @@ DEFAULT_TARGET = Path("/opt/models")
 DEFAULT_TIMEOUT_S = 120.0
 
 #: Names are fixed regardless of source URL so the image's
-#: AIR_SENTIMENT__CLASSIFIER__* paths stay valid when the URL is overridden.
+#: AIR_CLASSIFIER__CLASSIFIER__* paths stay valid when the URL is overridden.
 MODEL_FILENAME = "model.onnx"
 TOKENIZER_FILENAME = "tokenizer.json"
 
 _CHUNK_BYTES = 1 << 20
 _ARTIFACT_MODE = 0o644
 _ALLOWED_SCHEMES = frozenset({"https"})
-_USER_AGENT = "air-sentiment-fetch-model/1"
+_USER_AGENT = "air-classifier-fetch-model/1"
 _LOG_PREFIX = "[fetch-model]"
 
 

@@ -14,18 +14,18 @@ from collections.abc import Sequence
 
 import pytest
 
-from air_sentiment.config import (
+from air_classifier.config import (
     AppSettings,
     ClassifierSettings,
     Settings,
     TierSettings,
     TiersSettings,
 )
-from air_sentiment.constants import EscalationReason as Reason
-from air_sentiment.constants import Label, ResourceKind, Tier
-from air_sentiment.pipeline.policy import EscalationPolicy
-from air_sentiment.pipeline.tiers.base import TierContext
-from air_sentiment.schemas.common import (
+from air_classifier.constants import EscalationReason as Reason
+from air_classifier.constants import Label, ResourceKind, Tier
+from air_classifier.pipeline.policy import EscalationPolicy
+from air_classifier.pipeline.tiers.base import TierContext
+from air_classifier.schemas.common import (
     ComplexityFeatures,
     LanguageInfo,
     Options,
@@ -33,7 +33,7 @@ from air_sentiment.schemas.common import (
     SentimentResult,
     TierUsage,
 )
-from air_sentiment.schemas.verdict import TierVerdict
+from air_classifier.schemas.verdict import TierVerdict
 
 # ── Fixtures and builders ─────────────────────────────────────────────────────
 

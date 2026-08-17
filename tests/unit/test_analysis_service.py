@@ -13,9 +13,9 @@ from typing import Any, cast
 
 import pytest
 
-from air_sentiment.cache.memory import MemoryCache
-from air_sentiment.config import AppSettings, ClassifierSettings, Settings
-from air_sentiment.constants import (
+from air_classifier.cache.memory import MemoryCache
+from air_classifier.config import AppSettings, ClassifierSettings, Settings
+from air_classifier.constants import (
     Actionability,
     Label,
     RatingAgreement,
@@ -23,8 +23,8 @@ from air_sentiment.constants import (
     Tier,
     Urgency,
 )
-from air_sentiment.pipeline.orchestrator import NoVerdictError, Orchestrator
-from air_sentiment.pipeline.service import (
+from air_classifier.pipeline.orchestrator import NoVerdictError, Orchestrator
+from air_classifier.pipeline.service import (
     AnalysisService,
     _derive_route,
     _derive_urgency,
@@ -32,8 +32,8 @@ from air_sentiment.pipeline.service import (
     _shape_review,
     _shape_sentiment,
 )
-from air_sentiment.pipeline.tiers.base import TierContext
-from air_sentiment.schemas.common import (
+from air_classifier.pipeline.tiers.base import TierContext
+from air_classifier.schemas.common import (
     Aspect,
     Emotion,
     LanguageInfo,
@@ -43,10 +43,10 @@ from air_sentiment.schemas.common import (
     SentimentResult,
     TierUsage,
 )
-from air_sentiment.schemas.errors import ProblemDetail
-from air_sentiment.schemas.requests import FeedbackRequest, ReviewRequest, SentimentRequest
-from air_sentiment.schemas.responses import BaseAnalysisResponse
-from air_sentiment.schemas.verdict import (
+from air_classifier.schemas.errors import ProblemDetail
+from air_classifier.schemas.requests import FeedbackRequest, ReviewRequest, SentimentRequest
+from air_classifier.schemas.responses import BaseAnalysisResponse
+from air_classifier.schemas.verdict import (
     EscalationStep,
     OrchestrationResult,
     TierVerdict,

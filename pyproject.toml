@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "air-sentiment"
+name = "air-classifier"
 version = "0.1.0"
-description = "AIR Sentiment — layered sentiment analysis with cost-aware escalation"
+description = "AIR Classifier — layered text classification with cost-aware escalation"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
@@ -35,7 +35,7 @@ otel = [
 ]
 # Everything a production image needs.
 all = [
-    "air-sentiment[anthropic,openai,redis,onnx,otel]",
+    "air-classifier[anthropic,openai,redis,onnx,otel]",
 ]
 dev = [
     "pytest>=8.3",
@@ -48,10 +48,10 @@ dev = [
 ]
 
 [project.scripts]
-air-sentiment = "air_sentiment.__main__:main"
+air-classifier = "air_classifier.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/air_sentiment"]
+packages = ["src/air_classifier"]
 
 # ── Ruff ──────────────────────────────────────────────────────────────────────
 [tool.ruff]
@@ -84,7 +84,7 @@ ignore = [
 "scripts/**" = ["T20"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["air_sentiment"]
+known-first-party = ["air_classifier"]
 
 # ── mypy ──────────────────────────────────────────────────────────────────────
 [tool.mypy]
@@ -93,7 +93,7 @@ strict = true
 warn_unreachable = true
 plugins = ["pydantic.mypy"]
 mypy_path = "src"
-packages = ["air_sentiment"]
+packages = ["air_classifier"]
 
 [[tool.mypy.overrides]]
 module = ["onnxruntime.*", "tokenizers.*", "prometheus_client.*"]
@@ -117,7 +117,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["src/air_sentiment"]
+source = ["src/air_classifier"]
 branch = true
 
 [tool.coverage.report]

@@ -1,4 +1,4 @@
-# AIR Sentiment — High-Level Design
+# AIR Classifier — High-Level Design
 
 **Status:** Draft for review · **Companion docs:** [Plan](00-plan.md) · [LLD](02-lld.md)
 
@@ -11,7 +11,7 @@
                      │  HTTPS + X-API-Key
                      ▼
         ┌────────────────────────────────┐
-        │      air-sentiment (this)      │
+        │      air-classifier (this)      │
         │  FastAPI · stateless · Docker  │
         └───┬────────┬─────────┬─────────┘
             │        │         │
@@ -262,8 +262,10 @@ ladder can be exercised with four fake tiers and no network.
   artifact baked in. Healthcheck hits `/v1/health`.
 - **Process** — `uvicorn` with `uvloop`; worker count from config; graceful shutdown drains
   in-flight requests within a configurable window.
-- **Compose** — `air-sentiment` + `ollama` + `redis` + `prometheus` + `grafana` for local
-  and pilot use, with named volumes for the Ollama model store.
+- **Compose** — this service alone, joined to air-infra's `air-net` network. Redis, Ollama,
+  Prometheus and Grafana are shared platform components owned by air-infra and started once
+  for the whole platform; each is a URL in configuration, so production points at managed
+  instances without a code change and this file is never deployed.
 - **Config** — 12-factor via environment variables mapped through `pydantic-settings`;
   secrets injected, never baked into the image; `.env.example` documents every key.
 - **Probes** — `/v1/health` for liveness (process only), `/v1/ready` for readiness (probes

@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from starlette.responses import Response
 
-from air_sentiment.api.deps import (
+from air_classifier.api.deps import (
     RATE_LIMIT_HEADERS_ATTR,
     STATE_ATTR,
     AppState,
@@ -35,32 +35,32 @@ from air_sentiment.api.deps import (
     require_scope,
     store_idempotent,
 )
-from air_sentiment.api.errors import (
+from air_classifier.api.errors import (
     IdempotencyConflictError,
     InsufficientScopeError,
     MissingApiKeyError,
     RateLimitedError,
     install_error_handlers,
 )
-from air_sentiment.api.middleware import API_KEY_ID_ATTR
-from air_sentiment.cache.base import idempotency_cache_key
-from air_sentiment.cache.memory import MemoryCache
-from air_sentiment.config import AppSettings, CacheSettings, SecuritySettings, Settings
-from air_sentiment.constants import HEADER_API_KEY, HEADER_IDEMPOTENCY_KEY, Tier
-from air_sentiment.pipeline.orchestrator import Orchestrator
-from air_sentiment.pipeline.policy import EscalationPolicy
-from air_sentiment.schemas.common import Options
-from air_sentiment.security.api_keys import (
+from air_classifier.api.middleware import API_KEY_ID_ATTR
+from air_classifier.cache.base import idempotency_cache_key
+from air_classifier.cache.memory import MemoryCache
+from air_classifier.config import AppSettings, CacheSettings, SecuritySettings, Settings
+from air_classifier.constants import HEADER_API_KEY, HEADER_IDEMPOTENCY_KEY, Tier
+from air_classifier.pipeline.orchestrator import Orchestrator
+from air_classifier.pipeline.policy import EscalationPolicy
+from air_classifier.schemas.common import Options
+from air_classifier.security.api_keys import (
     SCOPE_ADMIN_READ,
     SCOPE_SENTIMENT_READ,
     ApiKeyRecord,
     ApiKeyStore,
     hash_key,
 )
-from air_sentiment.security.quotas import RateLimiter
+from air_classifier.security.quotas import RateLimiter
 
 SALT = "test-salt"
-RAW_KEY = "airs_test_key"
+RAW_KEY = "airc_test_key"
 BODY = b'{"text":"hello"}'
 
 
@@ -194,7 +194,7 @@ async def test_blank_header_is_treated_as_missing(memory_cache: MemoryCache) -> 
 
 async def test_unknown_key_is_forbidden(memory_cache: MemoryCache) -> None:
     state = make_state(memory_cache, records=[make_key()])
-    request = make_request(state, {HEADER_API_KEY: "airs_not_a_real_key"})
+    request = make_request(state, {HEADER_API_KEY: "airc_not_a_real_key"})
 
     with pytest.raises(InsufficientScopeError) as exc:
         await require_api_key(request)
@@ -316,8 +316,8 @@ async def test_quota_headers_are_published_on_rejection(memory_cache: MemoryCach
 
 
 async def test_quotas_are_charged_per_key(memory_cache: MemoryCache) -> None:
-    noisy = make_key(key_id="noisy", raw="airs_noisy", rate_limit_rpm=1, burst=0)
-    quiet = make_key(key_id="quiet", raw="airs_quiet", rate_limit_rpm=1, burst=0)
+    noisy = make_key(key_id="noisy", raw="airc_noisy", rate_limit_rpm=1, burst=0)
+    quiet = make_key(key_id="quiet", raw="airc_quiet", rate_limit_rpm=1, burst=0)
     state = make_state(memory_cache, records=[noisy, quiet])
     request = make_request(state)
 
@@ -437,8 +437,8 @@ async def test_same_key_with_a_different_body_conflicts(memory_cache: MemoryCach
 
 
 async def test_idempotency_is_scoped_per_key(memory_cache: MemoryCache) -> None:
-    mine = make_key(key_id="mine", raw="airs_mine")
-    yours = make_key(key_id="yours", raw="airs_yours")
+    mine = make_key(key_id="mine", raw="airc_mine")
+    yours = make_key(key_id="yours", raw="airc_yours")
     state = make_state(memory_cache, records=[mine, yours])
     headers = {HEADER_IDEMPOTENCY_KEY: "shared-key"}
     request = make_request(state, headers)
@@ -551,7 +551,7 @@ async def test_http_missing_key_is_401_problem_json(client: TestClient) -> None:
 
 
 async def test_http_unknown_key_is_403(client: TestClient) -> None:
-    response = client.post("/v1/ping", headers={HEADER_API_KEY: "airs_wrong"})
+    response = client.post("/v1/ping", headers={HEADER_API_KEY: "airc_wrong"})
 
     assert response.status_code == 403
     assert response.json()["type"].endswith("/insufficient-scope")

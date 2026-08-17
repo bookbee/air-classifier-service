@@ -13,12 +13,12 @@ import os
 
 import pytest
 
-from air_sentiment.cache.memory import MemoryCache
-from air_sentiment.config import Settings
+from air_classifier.cache.memory import MemoryCache
+from air_classifier.config import Settings
 
 
-def test_no_air_sentiment_environment_leaks_into_the_suite() -> None:
-    assert [name for name in os.environ if name.upper().startswith("AIR_SENTIMENT__")] == []
+def test_no_air_classifier_environment_leaks_into_the_suite() -> None:
+    assert [name for name in os.environ if name.upper().startswith("AIR_CLASSIFIER__")] == []
 
 
 def test_dotenv_is_not_read_during_tests() -> None:

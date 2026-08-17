@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from air_sentiment.constants import Provider
-from air_sentiment.observability import metrics
-from air_sentiment.resilience.breaker import (
+from air_classifier.constants import Provider
+from air_classifier.observability import metrics
+from air_classifier.resilience.breaker import (
     BreakerState,
     CircuitBreaker,
     CircuitOpenError,
@@ -306,7 +306,7 @@ async def test_concurrent_callers_open_the_breaker_once() -> None:
 async def test_transitions_drive_the_provider_gauge() -> None:
     def gauge() -> float | None:
         return metrics.get_registry().get_sample_value(
-            "air_sentiment_breaker_state", {"provider": Provider.OLLAMA.value}
+            "air_classifier_breaker_state", {"provider": Provider.OLLAMA.value}
         )
 
     breaker = CircuitBreaker(Provider.OLLAMA.value, threshold=1, cooldown_s=0.02)
@@ -327,7 +327,5 @@ async def test_a_breaker_that_is_not_a_provider_publishes_nothing() -> None:
     with pytest.raises(BoomError):
         await breaker.call(_fail)
 
-    assert (
-        metrics.get_registry().get_sample_value("air_sentiment_breaker_state", {"provider": "test"})
-        is None
-    )
+    registry = metrics.get_registry()
+    assert registry.get_sample_value("air_classifier_breaker_state", {"provider": "test"}) is None

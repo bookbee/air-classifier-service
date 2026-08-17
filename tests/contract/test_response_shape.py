@@ -28,7 +28,7 @@ from typing import Any, Final
 import pytest
 from fastapi.testclient import TestClient
 
-from air_sentiment.config import (
+from air_classifier.config import (
     AppSettings,
     CacheSettings,
     OllamaSettings,
@@ -36,9 +36,9 @@ from air_sentiment.config import (
     SecuritySettings,
     Settings,
 )
-from air_sentiment.constants import Tier
-from air_sentiment.main import create_app
-from air_sentiment.schemas.responses import (
+from air_classifier.constants import Tier
+from air_classifier.main import create_app
+from air_classifier.schemas.responses import (
     FeedbackResponse,
     ReviewResponse,
     SentimentResponse,

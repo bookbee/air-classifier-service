@@ -25,7 +25,7 @@ WORKDIR /build
 # Dependencies resolve from pyproject alone. A stub package satisfies hatchling
 # so this layer — the expensive one — survives every source edit.
 COPY pyproject.toml README.md ./
-RUN mkdir -p src/air_sentiment && touch src/air_sentiment/__init__.py
+RUN mkdir -p src/air_classifier && touch src/air_classifier/__init__.py
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && pip install ".[all]"
 
@@ -67,7 +67,7 @@ FROM ${PYTHON_IMAGE} AS runtime
 ARG VENV
 ARG MODEL_DIR
 
-LABEL org.opencontainers.image.title="air-sentiment" \
+LABEL org.opencontainers.image.title="air-classifier" \
       org.opencontainers.image.description="Layered sentiment analysis with cost-aware escalation" \
       org.opencontainers.image.source="https://github.com/bookbee/air-classifier" \
       org.opencontainers.image.licenses="Proprietary"
@@ -75,10 +75,10 @@ LABEL org.opencontainers.image.title="air-sentiment" \
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="${VENV}/bin:${PATH}" \
-    AIR_SENTIMENT__APP__HOST=0.0.0.0 \
-    AIR_SENTIMENT__APP__PORT=8080 \
-    AIR_SENTIMENT__CLASSIFIER__MODEL_PATH=${MODEL_DIR}/model.onnx \
-    AIR_SENTIMENT__CLASSIFIER__TOKENIZER_PATH=${MODEL_DIR}/tokenizer.json
+    AIR_CLASSIFIER__APP__HOST=0.0.0.0 \
+    AIR_CLASSIFIER__APP__PORT=8080 \
+    AIR_CLASSIFIER__CLASSIFIER__MODEL_PATH=${MODEL_DIR}/model.onnx \
+    AIR_CLASSIFIER__CLASSIFIER__TOKENIZER_PATH=${MODEL_DIR}/tokenizer.json
 
 RUN groupadd --system --gid 1001 air && \
     useradd --system --uid 1001 --gid air --home-dir /app --shell /usr/sbin/nologin air && \
@@ -97,5 +97,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/v1/health', timeout=2).read()"]
 
-ENTRYPOINT ["uvicorn", "air_sentiment.main:create_app", "--factory", \
+ENTRYPOINT ["uvicorn", "air_classifier.main:create_app", "--factory", \
             "--host", "0.0.0.0", "--port", "8080", "--proxy-headers"]

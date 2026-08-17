@@ -13,12 +13,12 @@ from fastapi import APIRouter, FastAPI, Request
 from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
 
-from air_sentiment.api.errors import (
+from air_classifier.api.errors import (
     PROBLEM_CONTENT_TYPE,
     MissingApiKeyError,
     install_error_handlers,
 )
-from air_sentiment.api.middleware import (
+from air_classifier.api.middleware import (
     AccessLogMiddleware,
     BodySizeLimitMiddleware,
     RequestContextMiddleware,
@@ -26,9 +26,9 @@ from air_sentiment.api.middleware import (
     new_request_id,
     resolve_request_id,
 )
-from air_sentiment.config import AppSettings, Settings
-from air_sentiment.constants import ERROR_TYPE_BASE, HEADER_REQUEST_ID
-from air_sentiment.observability import metrics
+from air_classifier.config import AppSettings, Settings
+from air_classifier.constants import ERROR_TYPE_BASE, HEADER_REQUEST_ID
+from air_classifier.observability import metrics
 
 #: Small enough that a test payload can exceed it without shipping a megabyte,
 #: but above the 1024 floor `AppSettings` enforces.
@@ -101,13 +101,13 @@ def _isolated_metrics(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """
     registry = CollectorRegistry()
     requests_total = metrics.Counter(
-        "air_sentiment_requests_total",
+        "air_classifier_requests_total",
         "test copy",
         ("endpoint", "status", "api_key_id"),
         registry=registry,
     )
     duration = metrics.Histogram(
-        "air_sentiment_request_duration_seconds",
+        "air_classifier_request_duration_seconds",
         "test copy",
         ("endpoint",),
         registry=registry,

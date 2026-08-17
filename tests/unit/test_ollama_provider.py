@@ -22,23 +22,23 @@ import httpx
 import pytest
 import respx
 
-from air_sentiment.config import (
+from air_classifier.config import (
     AppSettings,
     OllamaSettings,
     ProvidersSettings,
     Settings,
 )
-from air_sentiment.constants import Label, Provider
-from air_sentiment.providers import ollama_provider as module
-from air_sentiment.providers.base import (
+from air_classifier.constants import Label, Provider
+from air_classifier.providers import ollama_provider as module
+from air_classifier.providers.base import (
     LLMProvider,
     ProviderRateLimitError,
     ProviderResult,
     ProviderSchemaError,
     ProviderUnavailableError,
 )
-from air_sentiment.providers.ollama_provider import OllamaProvider
-from air_sentiment.schemas.verdict import LLMSentimentOutput
+from air_classifier.providers.ollama_provider import OllamaProvider
+from air_classifier.schemas.verdict import LLMSentimentOutput
 
 #: Deliberately unresolvable. See the module docstring.
 BASE_URL = "http://ollama.invalid:11434"
@@ -497,8 +497,8 @@ async def test_a_closed_provider_refuses_further_calls() -> None:
 
 @pytest.mark.integration
 @pytest.mark.skipif(
-    not os.getenv("AIR_SENTIMENT_TEST_OLLAMA"),
-    reason="set AIR_SENTIMENT_TEST_OLLAMA=1 with a local daemon and the model pulled",
+    not os.getenv("AIR_CLASSIFIER_TEST_OLLAMA"),
+    reason="set AIR_CLASSIFIER_TEST_OLLAMA=1 with a local daemon and the model pulled",
 )
 async def test_a_real_daemon_returns_schema_valid_output() -> None:
     """Opt-in smoke test against a live Ollama. Never part of the default run."""

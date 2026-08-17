@@ -1,94 +1,71 @@
-name: air-sentiment
+# air-classifier — this service, and nothing else.
+#
+# Redis, Ollama, Prometheus and Grafana are shared platform components owned by
+# air-infra and are NOT started here. This file joins air-infra's `air-net`
+# network and addresses them by service name, so the whole platform still runs
+# on one laptop with each port bound exactly once (air-infra/README.md, port map).
+#
+#   cd ../air-infra && make up        # once, before this
+#   make up                           # here
+#
+# In production none of this applies: DevOps supplies every endpoint below as an
+# environment variable against managed instances, and the compose file is not
+# deployed at all.
+name: air-classifier
 
 services:
-  air-sentiment:
+  air-classifier:
     build:
       context: .
       target: runtime
-    image: air-sentiment:local
+    image: air-classifier:local
     ports:
-      - "${AIR_SENTIMENT_PORT:-8080}:8080"
+      # Host side is 8082, this service's slot in the AIR port map
+      # (air-infra/README.md). Container side stays 8080 — pinned by the
+      # Dockerfile, and the port air-infra's prometheus scrapes on the host.
+      - "${AIR_CLASSIFIER_PORT:-8082}:8080"
+    # Lets the container reach a natively-run dependency on the developer's
+    # laptop. Required on Linux; Docker Desktop provides the name and ignores it.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      AIR_SENTIMENT__APP__ENV: development
-      AIR_SENTIMENT__OBS__LOG_FORMAT: console
-      AIR_SENTIMENT__OBS__LOG_LEVEL: INFO
-      # Local stack has no key store; every caller is the anonymous identity.
-      AIR_SENTIMENT__SECURITY__ALLOW_UNAUTHENTICATED: "true"
-      AIR_SENTIMENT__PROVIDERS__OLLAMA__BASE_URL: http://ollama:11434
-      AIR_SENTIMENT__CACHE__BACKEND: redis
-      AIR_SENTIMENT__CACHE__REDIS_URL: redis://redis:6379/0
+      AIR_CLASSIFIER__APP__ENV: development
+      AIR_CLASSIFIER__OBS__LOG_FORMAT: console
+      AIR_CLASSIFIER__OBS__LOG_LEVEL: INFO
+      # The local stack authenticates like every other environment. One known key
+      # is baked in — raw value `airc_local_dev_key`, hashed against the dev salt
+      # below — so callers such as air-client exercise the real auth path rather
+      # than an anonymous bypass. Both values are overridden in any real deploy.
+      AIR_CLASSIFIER__SECURITY__HASH_SALT: air-classifier-dev-salt
+      AIR_CLASSIFIER__SECURITY__API_KEYS_INLINE: >-
+        [{"id":"local-dev","name":"Local development",
+        "key_hash":"28b8a28925728a98c146e8463153abf3d30f4171ab4b536e7bde71c8975976be",
+        "scopes":["sentiment:read","admin:read"]}]
+      AIR_CLASSIFIER__SECURITY__ALLOW_UNAUTHENTICATED: "false"
+      # Tier 2. Defaults to air-infra's containerised ollama; `OLLAMA=native make up`
+      # swaps in the laptop's own, which is the only one with GPU access on macOS.
+      AIR_CLASSIFIER__PROVIDERS__OLLAMA__BASE_URL: ${AIR_CLASSIFIER_OLLAMA_URL:-http://ollama:11434}
+      # air-infra's redis. Password-protected even locally, so the credentials
+      # are part of the URL — an unauthenticated URL here fails closed and the
+      # cache silently degrades to misses rather than erroring.
+      AIR_CLASSIFIER__CACHE__BACKEND: redis
+      AIR_CLASSIFIER__CACHE__REDIS_URL: redis://:localdevpass@redis:6379/0
+      # Only consulted when PROVIDERS__GATEWAY__ENABLED is true; harmless
+      # otherwise, and correct the moment it is switched on.
+      AIR_CLASSIFIER__PROVIDERS__GATEWAY__BASE_URL: http://gateway:8080
     # Provider API keys arrive from an untracked .env; `environment:` wins over
     # `env_file:`, so those keys are deliberately absent above.
     env_file:
       - path: .env
         required: false
-    depends_on:
-      redis:
-        condition: service_healthy
-      ollama:
-        condition: service_healthy
     restart: unless-stopped
     # Healthcheck comes from the image so the probe cannot drift from the one
     # a production orchestrator uses.
 
-  ollama:
-    image: ollama/ollama:0.13.0
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
-    volumes:
-      - ollama-models:/root/.ollama
-    environment:
-      OLLAMA_KEEP_ALIVE: 10m
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "allkeys-lru"]
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped
-
-  prometheus:
-    image: prom/prometheus:v3.0.1
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.retention.time=7d
-    ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    depends_on:
-      - air-sentiment
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana:11.4.0
-    ports:
-      - "${GRAFANA_PORT:-3000}:3000"
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-      GF_USERS_ALLOW_SIGN_UP: "false"
-    volumes:
-      - grafana-data:/var/lib/grafana
-    depends_on:
-      - prometheus
-    restart: unless-stopped
-
-volumes:
-  ollama-models:
-  prometheus-data:
-  grafana-data:
+# air-infra owns this network and must be up first. `external: true` makes that
+# a loud failure ("network air-net not found") instead of a service that boots
+# healthy and then times out on every dependency.
+networks:
+  default:
+    name: air-net
+    external: true

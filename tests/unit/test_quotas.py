@@ -7,9 +7,9 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
-from air_sentiment.config import CacheSettings, SecuritySettings, Settings
-from air_sentiment.security.api_keys import ApiKeyRecord, hash_key
-from air_sentiment.security.quotas import WINDOW_SECONDS, RateLimiter, TokenBucket
+from air_classifier.config import CacheSettings, SecuritySettings, Settings
+from air_classifier.security.api_keys import ApiKeyRecord, hash_key
+from air_classifier.security.quotas import WINDOW_SECONDS, RateLimiter, TokenBucket
 
 
 class FakeCache:
@@ -197,7 +197,7 @@ async def test_check_key_uses_the_records_overrides() -> None:
     record = ApiKeyRecord(
         id="key-slow",
         name="slow",
-        key_hash=hash_key("airs_raw", "salt"),
+        key_hash=hash_key("airc_raw", "salt"),
         rate_limit_rpm=1,
         burst=0,
     )
@@ -208,7 +208,7 @@ async def test_check_key_uses_the_records_overrides() -> None:
 
 async def test_check_key_without_overrides_uses_service_defaults() -> None:
     limiter = RateLimiter(FakeCache(), _settings(default_rate_limit_rpm=2, default_burst=1))
-    record = ApiKeyRecord(id="key-default", name="default", key_hash=hash_key("airs_raw", "salt"))
+    record = ApiKeyRecord(id="key-default", name="default", key_hash=hash_key("airc_raw", "salt"))
 
     result = await limiter.check_key(record)
     assert result.limit == 3

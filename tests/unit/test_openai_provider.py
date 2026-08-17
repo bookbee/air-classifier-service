@@ -17,17 +17,17 @@ import openai
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from air_sentiment.config import AppSettings, OpenAISettings, ProvidersSettings, Settings
-from air_sentiment.constants import Label, Provider
-from air_sentiment.observability.cost import ModelPrice, override_prices, reset_price_table
-from air_sentiment.providers.base import (
+from air_classifier.config import AppSettings, OpenAISettings, ProvidersSettings, Settings
+from air_classifier.constants import Label, Provider
+from air_classifier.observability.cost import ModelPrice, override_prices, reset_price_table
+from air_classifier.providers.base import (
     ProviderRateLimitError,
     ProviderRefusalError,
     ProviderSchemaError,
     ProviderUnavailableError,
 )
-from air_sentiment.providers.openai_provider import PROMPT_CACHE_KEY, OpenAIProvider
-from air_sentiment.schemas.verdict import LLMSentimentOutput
+from air_classifier.providers.openai_provider import PROMPT_CACHE_KEY, OpenAIProvider
+from air_classifier.schemas.verdict import LLMSentimentOutput
 
 #: Distinguishes "use the default parsed output" from "the SDK returned None".
 _UNSET: Any = object()

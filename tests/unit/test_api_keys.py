@@ -10,9 +10,9 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
-from air_sentiment.config import SecuritySettings, Settings
-from air_sentiment.constants import Tier
-from air_sentiment.security.api_keys import (
+from air_classifier.config import SecuritySettings, Settings
+from air_classifier.constants import Tier
+from air_classifier.security.api_keys import (
     ALL_SCOPES,
     ANONYMOUS_KEY_ID,
     KEY_PREFIX,
@@ -23,7 +23,7 @@ from air_sentiment.security.api_keys import (
 )
 
 SALT = "unit-test-salt"
-RAW_KEY = "airs_known-raw-key"
+RAW_KEY = "airc_known-raw-key"
 
 
 def _record(**overrides: Any) -> ApiKeyRecord:
@@ -82,7 +82,7 @@ def test_lookup_resolves_a_known_key() -> None:
 
 
 def test_lookup_of_unknown_key_returns_none() -> None:
-    assert _store(_record()).lookup("airs_not-a-real-key") is None
+    assert _store(_record()).lookup("airc_not-a-real-key") is None
 
 
 def test_lookup_of_empty_or_missing_key_returns_none() -> None:

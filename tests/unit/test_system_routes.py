@@ -21,17 +21,17 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from prometheus_client import CONTENT_TYPE_LATEST
 
-from air_sentiment import __version__
-from air_sentiment.api.v1 import system
-from air_sentiment.cache.base import CacheBackend
-from air_sentiment.config import AppSettings, ClassifierSettings, Settings, TierSettings
-from air_sentiment.config import TiersSettings as TiersConfig
-from air_sentiment.constants import Tier as TierId
-from air_sentiment.observability import metrics
-from air_sentiment.pipeline.tiers.base import Tier as TierProtocol
-from air_sentiment.pipeline.tiers.base import TierContext
-from air_sentiment.pipeline.tiers.scorers import LEXICON_SCORER_NAME
-from air_sentiment.schemas.verdict import TierVerdict
+from air_classifier import __version__
+from air_classifier.api.v1 import system
+from air_classifier.cache.base import CacheBackend
+from air_classifier.config import AppSettings, ClassifierSettings, Settings, TierSettings
+from air_classifier.config import TiersSettings as TiersConfig
+from air_classifier.constants import Tier as TierId
+from air_classifier.observability import metrics
+from air_classifier.pipeline.tiers.base import Tier as TierProtocol
+from air_classifier.pipeline.tiers.base import TierContext
+from air_classifier.pipeline.tiers.scorers import LEXICON_SCORER_NAME
+from air_classifier.schemas.verdict import TierVerdict
 
 
 class ProbeExplodedError(AssertionError):
@@ -477,7 +477,7 @@ async def test_metrics_returns_the_prometheus_exposition(app_settings: Settings)
     # would fail on a `prometheus-client` upgrade that changed nothing here.
     assert response.headers["content-type"] == CONTENT_TYPE_LATEST
     assert response.headers["content-type"].startswith("text/plain")
-    assert "air_sentiment_requests_total" in response.text
+    assert "air_classifier_requests_total" in response.text
 
 
 async def test_metrics_is_not_namespaced_under_v1(app_settings: Settings) -> None:

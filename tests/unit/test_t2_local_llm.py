@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from air_sentiment.config import (
+from air_classifier.config import (
     AppSettings,
     OllamaSettings,
     ProvidersSettings,
@@ -26,24 +26,24 @@ from air_sentiment.config import (
     TierSettings,
     TiersSettings,
 )
-from air_sentiment.constants import Label, Provider, ResourceKind, Tier
-from air_sentiment.observability import metrics
-from air_sentiment.pipeline.features import extract_features
-from air_sentiment.pipeline.tiers import base as tier_base
-from air_sentiment.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
-from air_sentiment.pipeline.tiers.t2_local_llm import LocalLLMTier
-from air_sentiment.providers.base import (
+from air_classifier.constants import Label, Provider, ResourceKind, Tier
+from air_classifier.observability import metrics
+from air_classifier.pipeline.features import extract_features
+from air_classifier.pipeline.tiers import base as tier_base
+from air_classifier.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
+from air_classifier.pipeline.tiers.t2_local_llm import LocalLLMTier
+from air_classifier.providers.base import (
     ProviderRateLimitError,
     ProviderRefusalError,
     ProviderResult,
     ProviderSchemaError,
     ProviderUnavailableError,
 )
-from air_sentiment.providers.prompts.loader import compact_system_prompt, system_prompt
-from air_sentiment.resilience.breaker import CircuitBreaker
-from air_sentiment.resilience.bulkhead import Bulkhead
-from air_sentiment.schemas.common import Emotion, LanguageInfo, Options, SafetyReport
-from air_sentiment.schemas.verdict import LLMSentimentOutput
+from air_classifier.providers.prompts.loader import compact_system_prompt, system_prompt
+from air_classifier.resilience.breaker import CircuitBreaker
+from air_classifier.resilience.bulkhead import Bulkhead
+from air_classifier.schemas.common import Emotion, LanguageInfo, Options, SafetyReport
+from air_classifier.schemas.verdict import LLMSentimentOutput
 
 TEXT = "Great battery but the camera is awful."
 MODEL = "llama3.2:3b"
@@ -226,11 +226,11 @@ async def test_the_verdict_times_the_whole_rung_not_the_provider_call() -> None:
 async def test_token_volume_reaches_the_usage_metric() -> None:
     registry = metrics.get_registry()
     labels = {"provider": Provider.OLLAMA.value, "model": MODEL, "kind": "in"}
-    before = registry.get_sample_value("air_sentiment_llm_tokens_total", labels) or 0.0
+    before = registry.get_sample_value("air_classifier_llm_tokens_total", labels) or 0.0
 
     await _tier(StubProvider(_result())).analyse(_ctx())
 
-    after = registry.get_sample_value("air_sentiment_llm_tokens_total", labels) or 0.0
+    after = registry.get_sample_value("air_classifier_llm_tokens_total", labels) or 0.0
     assert after - before == pytest.approx(412.0)
 
 

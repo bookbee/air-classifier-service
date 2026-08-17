@@ -1,4 +1,4 @@
-# AIR Sentiment — Low-Level Design
+# AIR Classifier — Low-Level Design
 
 **Status:** Draft for review · **Companion docs:** [Plan](00-plan.md) · [HLD](01-hld.md)
 
@@ -10,14 +10,14 @@ be wrong, the document gets amended rather than silently diverged from.
 ## 1. Repository layout
 
 ```
-air-sentiment/
+air-classifier/
 ├── pyproject.toml                 # deps, ruff, mypy, pytest config
 ├── Dockerfile                     # multi-stage, non-root runtime
-├── docker-compose.yml             # app + ollama + redis + prometheus + grafana
+├── docker-compose.yml             # this service only; deps come from air-infra
 ├── Makefile                       # dev / test / lint / run / image targets
 ├── .env.example                   # every settings key, documented
 ├── docs/                          # 00-plan · 01-hld · 02-lld · api · operations
-└── src/air_sentiment/
+└── src/air_classifier/
     ├── __init__.py                # __version__
     ├── main.py                    # create_app(), lifespan, middleware wiring
     ├── config.py                  # Settings (pydantic-settings), get_settings()
@@ -500,7 +500,7 @@ until the half-open probe succeeds, rather than every request paying a failed at
 
 ## 7. Configuration
 
-`pydantic-settings`, prefix `AIR_SENTIMENT__`, nested via `__`. Every key in `.env.example`.
+`pydantic-settings`, prefix `AIR_CLASSIFIER__`, nested via `__`. Every key in `.env.example`.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
@@ -534,18 +534,18 @@ until the half-open probe succeeds, rather than every request paying a failed at
 
 | Name | Type | Labels |
 | --- | --- | --- |
-| `air_sentiment_requests_total` | counter | `endpoint`, `status`, `api_key_id` |
-| `air_sentiment_request_duration_seconds` | histogram | `endpoint` |
-| `air_sentiment_tier_decisions_total` | counter | `tier`, `outcome` (`stop`/`escalate`/`failed`) |
-| `air_sentiment_escalations_total` | counter | `from_tier`, `to_tier`, `reason` |
-| `air_sentiment_tier_duration_seconds` | histogram | `tier` |
-| `air_sentiment_decided_by_total` | counter | `tier` |
-| `air_sentiment_llm_tokens_total` | counter | `provider`, `model`, `kind` (`in`/`out`/`cache_read`/`cache_write`) |
-| `air_sentiment_llm_cost_usd_total` | counter | `provider`, `model` |
-| `air_sentiment_cache_events_total` | counter | `result` (`hit`/`miss`/`store`) |
-| `air_sentiment_breaker_state` | gauge | `provider` (0 closed / 1 half-open / 2 open) |
-| `air_sentiment_degraded_responses_total` | counter | `reason` |
-| `air_sentiment_pii_redactions_total` | counter | `kind` |
+| `air_classifier_requests_total` | counter | `endpoint`, `status`, `api_key_id` |
+| `air_classifier_request_duration_seconds` | histogram | `endpoint` |
+| `air_classifier_tier_decisions_total` | counter | `tier`, `outcome` (`stop`/`escalate`/`failed`) |
+| `air_classifier_escalations_total` | counter | `from_tier`, `to_tier`, `reason` |
+| `air_classifier_tier_duration_seconds` | histogram | `tier` |
+| `air_classifier_decided_by_total` | counter | `tier` |
+| `air_classifier_llm_tokens_total` | counter | `provider`, `model`, `kind` (`in`/`out`/`cache_read`/`cache_write`) |
+| `air_classifier_llm_cost_usd_total` | counter | `provider`, `model` |
+| `air_classifier_cache_events_total` | counter | `result` (`hit`/`miss`/`store`) |
+| `air_classifier_breaker_state` | gauge | `provider` (0 closed / 1 half-open / 2 open) |
+| `air_classifier_degraded_responses_total` | counter | `reason` |
+| `air_classifier_pii_redactions_total` | counter | `kind` |
 
 `decided_by_total` divided by `requests_total` **is** the tier-distribution KPI from the
 plan — the primary dashboard panel and the number that says whether the ladder is earning

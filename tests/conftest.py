@@ -22,16 +22,16 @@ import structlog
 # considerably less obvious.
 from structlog._config import BoundLoggerLazyProxy
 
-from air_sentiment.cache.memory import MemoryCache
-from air_sentiment.config import AppSettings, Settings, get_settings
-from air_sentiment.observability import logging as obs_logging
+from air_classifier.cache.memory import MemoryCache
+from air_classifier.config import AppSettings, Settings, get_settings
+from air_classifier.observability import logging as obs_logging
 
 
 @pytest.fixture(autouse=True)
 def _hermetic_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Keep the developer's machine out of the test run.
 
-    ``Settings`` is 12-factor, which means an exported ``AIR_SENTIMENT__*``
+    ``Settings`` is 12-factor, which means an exported ``AIR_CLASSIFIER__*``
     variable or a ``.env`` sitting in the checkout silently rewrites the object
     under test. Both are stripped for the duration of every test, so a suite that
     passes on a laptop passes in CI for the same reasons.
@@ -41,7 +41,7 @@ def _hermetic_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     the next one.
     """
     for name in list(os.environ):
-        if name.upper().startswith("AIR_SENTIMENT__"):
+        if name.upper().startswith("AIR_CLASSIFIER__"):
             monkeypatch.delenv(name, raising=False)
     monkeypatch.setitem(Settings.model_config, "env_file", None)
 
@@ -129,7 +129,7 @@ def _release_memoised_loggers() -> None:
     up at the source instead of being left for the next author to find.
     """
     for name, module in list(sys.modules.items()):
-        if not name.startswith("air_sentiment"):
+        if not name.startswith("air_classifier"):
             continue
         for value in vars(module).values():
             if isinstance(value, BoundLoggerLazyProxy):

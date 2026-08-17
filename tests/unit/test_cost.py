@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
-from air_sentiment.observability import cost as cost_module
-from air_sentiment.observability.cost import (
+from air_classifier.observability import cost as cost_module
+from air_classifier.observability.cost import (
     PRICE_TABLE,
     CostMeter,
     ModelPrice,
@@ -23,7 +23,7 @@ from air_sentiment.observability.cost import (
     price_for,
     reset_price_table,
 )
-from air_sentiment.schemas.common import TierUsage
+from air_classifier.schemas.common import TierUsage
 
 MTOK = 1_000_000
 

@@ -15,20 +15,20 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, SecretStr
 
-from air_sentiment.config import (
+from air_classifier.config import (
     AnthropicSettings,
     AppSettings,
     OpenAISettings,
     ProvidersSettings,
     Settings,
 )
-from air_sentiment.constants import Provider, ResourceKind
-from air_sentiment.pipeline.features import extract_features
-from air_sentiment.pipeline.tiers.base import TierContext
-from air_sentiment.providers.base import ProviderResult
-from air_sentiment.providers.registry import NoProviderAvailableError, ProviderRegistry
-from air_sentiment.resilience.breaker import CircuitBreaker
-from air_sentiment.schemas.common import LanguageInfo, Options, SafetyReport
+from air_classifier.constants import Provider, ResourceKind
+from air_classifier.pipeline.features import extract_features
+from air_classifier.pipeline.tiers.base import TierContext
+from air_classifier.providers.base import ProviderResult
+from air_classifier.providers.registry import NoProviderAvailableError, ProviderRegistry
+from air_classifier.resilience.breaker import CircuitBreaker
+from air_classifier.schemas.common import LanguageInfo, Options, SafetyReport
 
 TEXT = "Great battery but the camera is awful."
 

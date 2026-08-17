@@ -16,21 +16,21 @@ from pathlib import Path
 
 import pytest
 
-from air_sentiment.config import AppSettings, Settings, TiersSettings
-from air_sentiment.constants import Label, ResourceKind, Tier
-from air_sentiment.observability import metrics
-from air_sentiment.pipeline import orchestrator as orchestrator_module
-from air_sentiment.pipeline.orchestrator import NoVerdictError, Orchestrator
-from air_sentiment.pipeline.policy import EscalationPolicy
-from air_sentiment.pipeline.tiers.base import (
+from air_classifier.config import AppSettings, Settings, TiersSettings
+from air_classifier.constants import Label, ResourceKind, Tier
+from air_classifier.observability import metrics
+from air_classifier.pipeline import orchestrator as orchestrator_module
+from air_classifier.pipeline.orchestrator import NoVerdictError, Orchestrator
+from air_classifier.pipeline.policy import EscalationPolicy
+from air_classifier.pipeline.tiers.base import (
     Tier as TierProtocol,
 )
-from air_sentiment.pipeline.tiers.base import (
+from air_classifier.pipeline.tiers.base import (
     TierContext,
     TierError,
     TierUnavailableError,
 )
-from air_sentiment.schemas.common import (
+from air_classifier.schemas.common import (
     ComplexityFeatures,
     LanguageInfo,
     Options,
@@ -38,7 +38,7 @@ from air_sentiment.schemas.common import (
     SentimentResult,
     TierUsage,
 )
-from air_sentiment.schemas.verdict import TierVerdict
+from air_classifier.schemas.verdict import TierVerdict
 
 # ── Scripted rungs ────────────────────────────────────────────────────────────
 
@@ -406,24 +406,24 @@ async def test_context_is_threaded_immutably() -> None:
 
 
 async def test_the_ladder_emits_its_metrics() -> None:
-    decided = sample("air_sentiment_decided_by_total", tier="t1_classifier")
+    decided = sample("air_classifier_decided_by_total", tier="t1_classifier")
     climbed = sample(
-        "air_sentiment_escalations_total",
+        "air_classifier_escalations_total",
         from_tier="t0_rules",
         to_tier="t1_classifier",
         reason="low_confidence",
     )
-    stopped = sample("air_sentiment_tier_decisions_total", tier="t1_classifier", outcome="stop")
-    timed = sample("air_sentiment_tier_duration_seconds_count", tier="t0_rules")
+    stopped = sample("air_classifier_tier_decisions_total", tier="t1_classifier", outcome="stop")
+    timed = sample("air_classifier_tier_duration_seconds_count", tier="t0_rules")
 
     t0 = FakeTier(tier=Tier.T0_RULES, verdict=unsure(Tier.T0_RULES))
     t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=verdict(Tier.T1_CLASSIFIER))
     await build(t0, t1).run(make_ctx())
 
-    assert sample("air_sentiment_decided_by_total", tier="t1_classifier") == decided + 1
+    assert sample("air_classifier_decided_by_total", tier="t1_classifier") == decided + 1
     assert (
         sample(
-            "air_sentiment_escalations_total",
+            "air_classifier_escalations_total",
             from_tier="t0_rules",
             to_tier="t1_classifier",
             reason="low_confidence",
@@ -431,15 +431,15 @@ async def test_the_ladder_emits_its_metrics() -> None:
         == climbed + 1
     )
     assert (
-        sample("air_sentiment_tier_decisions_total", tier="t1_classifier", outcome="stop")
+        sample("air_classifier_tier_decisions_total", tier="t1_classifier", outcome="stop")
         == stopped + 1
     )
-    assert sample("air_sentiment_tier_duration_seconds_count", tier="t0_rules") == timed + 1
+    assert sample("air_classifier_tier_duration_seconds_count", tier="t0_rules") == timed + 1
 
 
 async def test_a_failed_rung_is_counted_as_failed_not_as_an_escalation() -> None:
     def failures() -> float:
-        return sample("air_sentiment_tier_decisions_total", tier="t0_rules", outcome="failed")
+        return sample("air_classifier_tier_decisions_total", tier="t0_rules", outcome="failed")
 
     before = failures()
     t0 = FakeTier(tier=Tier.T0_RULES, raises=TierError("down"))

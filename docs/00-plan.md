@@ -1,4 +1,4 @@
-# AIR Sentiment — Plan
+# AIR Classifier — Plan
 
 **Status:** Draft for review · **Owner:** Vikas Roy · **Date:** 2026-08-08
 
@@ -6,7 +6,7 @@
 
 ## 1. Problem statement
 
-`air-sentiment` is the AIR platform's sentiment assessment service. It accepts arbitrary
+`air-classifier` is the AIR platform's sentiment assessment service. It accepts arbitrary
 user-authored text — plus surrounding context and metadata — and returns a structured,
 explainable sentiment verdict over a REST API.
 

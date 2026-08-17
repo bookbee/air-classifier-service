@@ -28,32 +28,32 @@ import time
 
 import pytest
 
-from air_sentiment.config import Settings
-from air_sentiment.constants import EscalationReason, Label, ResourceKind
-from air_sentiment.constants import Tier as TierId
-from air_sentiment.pipeline.features import extract_features
-from air_sentiment.pipeline.orchestrator import NoVerdictError, Orchestrator
-from air_sentiment.pipeline.policy import EscalationPolicy
-from air_sentiment.pipeline.tiers.base import (
+from air_classifier.config import Settings
+from air_classifier.constants import EscalationReason, Label, ResourceKind
+from air_classifier.constants import Tier as TierId
+from air_classifier.pipeline.features import extract_features
+from air_classifier.pipeline.orchestrator import NoVerdictError, Orchestrator
+from air_classifier.pipeline.policy import EscalationPolicy
+from air_classifier.pipeline.tiers.base import (
     Tier,
     TierContext,
     TierError,
     TierUnavailableError,
 )
-from air_sentiment.pipeline.tiers.t0_rules import RulesTier
-from air_sentiment.pipeline.tiers.t1_classifier import ClassifierTier
-from air_sentiment.pipeline.tiers.t2_local_llm import LocalLLMTier
-from air_sentiment.pipeline.tiers.t3_cloud_llm import CloudLLMTier
-from air_sentiment.preprocess.language import detect_language
-from air_sentiment.preprocess.lexicon import score_text
-from air_sentiment.preprocess.normalize import normalize
-from air_sentiment.providers.anthropic_provider import AnthropicProvider
-from air_sentiment.providers.base import LLMProvider
-from air_sentiment.providers.ollama_provider import OllamaProvider
-from air_sentiment.providers.openai_provider import OpenAIProvider
-from air_sentiment.providers.registry import ProviderRegistry
-from air_sentiment.schemas.common import Options, SafetyReport, SentimentResult
-from air_sentiment.schemas.verdict import OrchestrationResult, TierVerdict
+from air_classifier.pipeline.tiers.t0_rules import RulesTier
+from air_classifier.pipeline.tiers.t1_classifier import ClassifierTier
+from air_classifier.pipeline.tiers.t2_local_llm import LocalLLMTier
+from air_classifier.pipeline.tiers.t3_cloud_llm import CloudLLMTier
+from air_classifier.preprocess.language import detect_language
+from air_classifier.preprocess.lexicon import score_text
+from air_classifier.preprocess.normalize import normalize
+from air_classifier.providers.anthropic_provider import AnthropicProvider
+from air_classifier.providers.base import LLMProvider
+from air_classifier.providers.ollama_provider import OllamaProvider
+from air_classifier.providers.openai_provider import OpenAIProvider
+from air_classifier.providers.registry import ProviderRegistry
+from air_classifier.schemas.common import Options, SafetyReport, SentimentResult
+from air_classifier.schemas.verdict import OrchestrationResult, TierVerdict
 
 # ── Building a request the way the API layer will ─────────────────────────────
 

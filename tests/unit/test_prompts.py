@@ -13,11 +13,11 @@ import time
 
 import pytest
 
-from air_sentiment.config import Settings
-from air_sentiment.constants import Label, ResourceKind, Tier
-from air_sentiment.pipeline.features import extract_features
-from air_sentiment.pipeline.tiers.base import TierContext
-from air_sentiment.providers.prompts.loader import (
+from air_classifier.config import Settings
+from air_classifier.constants import Label, ResourceKind, Tier
+from air_classifier.pipeline.features import extract_features
+from air_classifier.pipeline.tiers.base import TierContext
+from air_classifier.providers.prompts.loader import (
     HAIKU_MIN_CACHEABLE_TOKENS,
     compact_system_prompt,
     estimated_compact_tokens,
@@ -26,7 +26,7 @@ from air_sentiment.providers.prompts.loader import (
     system_prompt,
     user_content,
 )
-from air_sentiment.schemas.common import (
+from air_classifier.schemas.common import (
     LanguageInfo,
     Options,
     PIIFinding,
@@ -34,8 +34,8 @@ from air_sentiment.schemas.common import (
     SentimentResult,
     TierUsage,
 )
-from air_sentiment.schemas.requests import MAX_TEXT_CHARS
-from air_sentiment.schemas.verdict import TierVerdict
+from air_classifier.schemas.requests import MAX_TEXT_CHARS
+from air_classifier.schemas.verdict import TierVerdict
 
 TEXT = "Great battery but the camera is awful."
 

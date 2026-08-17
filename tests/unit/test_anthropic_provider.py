@@ -19,19 +19,19 @@ import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from air_sentiment.config import AnthropicSettings, AppSettings, ProvidersSettings, Settings
-from air_sentiment.constants import Label, Provider
-from air_sentiment.providers.anthropic_provider import (
+from air_classifier.config import AnthropicSettings, AppSettings, ProvidersSettings, Settings
+from air_classifier.constants import Label, Provider
+from air_classifier.providers.anthropic_provider import (
     ADAPTIVE_THINKING_MODELS,
     AnthropicProvider,
 )
-from air_sentiment.providers.base import (
+from air_classifier.providers.base import (
     ProviderRateLimitError,
     ProviderRefusalError,
     ProviderSchemaError,
     ProviderUnavailableError,
 )
-from air_sentiment.schemas.verdict import LLMSentimentOutput
+from air_classifier.schemas.verdict import LLMSentimentOutput
 
 #: Distinguishes "use the default parsed output" from "the SDK returned None".
 _UNSET: Any = object()

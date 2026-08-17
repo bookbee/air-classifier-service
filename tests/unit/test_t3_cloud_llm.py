@@ -15,28 +15,28 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, SecretStr
 
-from air_sentiment.config import (
+from air_classifier.config import (
     AnthropicSettings,
     AppSettings,
     ProvidersSettings,
     Settings,
 )
-from air_sentiment.constants import Label, Provider, ResourceKind
-from air_sentiment.observability.cost import ModelPrice, override_prices, reset_price_table
-from air_sentiment.pipeline.features import extract_features
-from air_sentiment.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
-from air_sentiment.pipeline.tiers.t3_cloud_llm import CloudLLMTier
-from air_sentiment.providers.base import (
+from air_classifier.constants import Label, Provider, ResourceKind
+from air_classifier.observability.cost import ModelPrice, override_prices, reset_price_table
+from air_classifier.pipeline.features import extract_features
+from air_classifier.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
+from air_classifier.pipeline.tiers.t3_cloud_llm import CloudLLMTier
+from air_classifier.providers.base import (
     ProviderRefusalError,
     ProviderResult,
     ProviderSchemaError,
     ProviderUnavailableError,
 )
-from air_sentiment.providers.registry import ProviderRegistry
-from air_sentiment.resilience.breaker import CircuitBreaker
-from air_sentiment.resilience.bulkhead import Bulkhead
-from air_sentiment.schemas.common import LanguageInfo, Options, SafetyReport
-from air_sentiment.schemas.verdict import LLMSentimentOutput
+from air_classifier.providers.registry import ProviderRegistry
+from air_classifier.resilience.breaker import CircuitBreaker
+from air_classifier.resilience.bulkhead import Bulkhead
+from air_classifier.schemas.common import LanguageInfo, Options, SafetyReport
+from air_classifier.schemas.verdict import LLMSentimentOutput
 
 TEXT = "Great battery but the camera is awful."
 HAIKU = "claude-haiku-4-5"

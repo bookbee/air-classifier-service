@@ -10,16 +10,16 @@ from typing import Any, Literal
 import pytest
 import structlog
 
-from air_sentiment.cache.base import text_fingerprint
-from air_sentiment.config import (
+from air_classifier.cache.base import text_fingerprint
+from air_classifier.config import (
     AppSettings,
     ObservabilitySettings,
     SecuritySettings,
     Settings,
 )
-from air_sentiment.observability import logging as obs_logging
-from air_sentiment.observability import tracing as obs_tracing
-from air_sentiment.observability.logging import (
+from air_classifier.observability import logging as obs_logging
+from air_classifier.observability import tracing as obs_tracing
+from air_classifier.observability.logging import (
     bind_request_context,
     clear_request_context,
     configure_logging,
@@ -80,14 +80,14 @@ def emitted(capsys: pytest.CaptureFixture[str]) -> list[dict[str, Any]]:
 
 def test_json_output_shape(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings())
-    get_logger("air_sentiment.test").info("tier.decision", tier="t1_classifier", escalate=True)
+    get_logger("air_classifier.test").info("tier.decision", tier="t1_classifier", escalate=True)
 
     records = emitted(capsys)
     assert len(records) == 1
     record = records[0]
     assert record["event"] == "tier.decision"
     assert record["level"] == "info"
-    assert record["logger"] == "air_sentiment.test"
+    assert record["logger"] == "air_classifier.test"
     assert record["tier"] == "t1_classifier"
     assert record["escalate"] is True
     assert record["timestamp"].endswith("Z")
@@ -95,7 +95,7 @@ def test_json_output_shape(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_console_format_is_not_json(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings(log_format="console"))
-    get_logger("air_sentiment.test").info("tier.decision", tier="t0_rules")
+    get_logger("air_classifier.test").info("tier.decision", tier="t0_rules")
 
     out = capsys.readouterr().out
     assert "tier.decision" in out
@@ -106,7 +106,7 @@ def test_console_format_is_not_json(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_level_filters_below_threshold(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings(log_level="WARNING"))
-    log = get_logger("air_sentiment.test")
+    log = get_logger("air_classifier.test")
     log.info("suppressed")
     log.warning("kept")
 
@@ -115,7 +115,7 @@ def test_level_filters_below_threshold(capsys: pytest.CaptureFixture[str]) -> No
 
 def test_non_serialisable_values_do_not_raise(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings())
-    get_logger("air_sentiment.test").info("weird", value=object())
+    get_logger("air_classifier.test").info("weird", value=object())
 
     assert emitted(capsys)[0]["value"].startswith("<object object")
 
@@ -125,7 +125,7 @@ def test_exception_is_rendered(capsys: pytest.CaptureFixture[str]) -> None:
     try:
         raise ValueError("boom")
     except ValueError:
-        get_logger("air_sentiment.test").exception("tier.failed")
+        get_logger("air_classifier.test").exception("tier.failed")
 
     record = emitted(capsys)[0]
     assert record["level"] == "error"
@@ -143,7 +143,7 @@ def test_configure_is_idempotent(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(settings)
 
     assert len(logging.getLogger().handlers) == before + 1
-    get_logger("air_sentiment.test").info("once")
+    get_logger("air_classifier.test").info("once")
     assert len(emitted(capsys)) == 1
 
 
@@ -174,7 +174,7 @@ def test_adopted_logger_handlers_are_replaced() -> None:
 def test_bound_context_appears_on_records(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings())
     bind_request_context(request_id="req_01J", trace_id="4bf9" * 8)
-    get_logger("air_sentiment.test").info("http.request")
+    get_logger("air_classifier.test").info("http.request")
 
     record = emitted(capsys)[0]
     assert record["request_id"] == "req_01J"
@@ -191,7 +191,7 @@ def test_bound_context_reaches_stdlib_records(capsys: pytest.CaptureFixture[str]
 
 def test_clear_request_context_removes_fields(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings())
-    log = get_logger("air_sentiment.test")
+    log = get_logger("air_classifier.test")
     bind_request_context(request_id="req_03L")
     log.info("during")
     clear_request_context()
@@ -228,7 +228,7 @@ def test_safe_text_fields_survives_a_log_round_trip(
     settings = make_settings()
     configure_logging(settings)
     text = "sécurité: 用户 feedback 🙂"
-    get_logger("air_sentiment.test").info("tier.decision", **safe_text_fields(text, settings))
+    get_logger("air_classifier.test").info("tier.decision", **safe_text_fields(text, settings))
 
     record = emitted(capsys)[0]
     assert record["text_sha256"] == text_fingerprint(text)

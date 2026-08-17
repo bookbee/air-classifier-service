@@ -14,16 +14,16 @@ from typing import Any
 
 import pytest
 
-from air_sentiment.config import Settings
-from air_sentiment.constants import EscalationReason, Label, ResourceKind, Tier
-from air_sentiment.pipeline.features import extract_features
-from air_sentiment.pipeline.tiers.base import Tier as TierProtocol
-from air_sentiment.pipeline.tiers.base import TierContext
-from air_sentiment.pipeline.tiers.t0_rules import MODEL_VERSION, RulesTier, Shortcut
-from air_sentiment.preprocess.language import detect_language
-from air_sentiment.preprocess.lexicon import score_text
-from air_sentiment.schemas.common import LanguageInfo, Options, SafetyReport
-from air_sentiment.schemas.verdict import TierVerdict
+from air_classifier.config import Settings
+from air_classifier.constants import EscalationReason, Label, ResourceKind, Tier
+from air_classifier.pipeline.features import extract_features
+from air_classifier.pipeline.tiers.base import Tier as TierProtocol
+from air_classifier.pipeline.tiers.base import TierContext
+from air_classifier.pipeline.tiers.t0_rules import MODEL_VERSION, RulesTier, Shortcut
+from air_classifier.preprocess.language import detect_language
+from air_classifier.preprocess.lexicon import score_text
+from air_classifier.schemas.common import LanguageInfo, Options, SafetyReport
+from air_classifier.schemas.verdict import TierVerdict
 
 
 def make_ctx(

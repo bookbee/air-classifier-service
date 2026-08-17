@@ -6,23 +6,23 @@ from __future__ import annotations
 import prometheus_client
 import pytest
 
-from air_sentiment.constants import EscalationReason, PIIKind, Provider, Tier
-from air_sentiment.observability import metrics
-from air_sentiment.observability.metrics import BreakerState, CacheEvent, TierOutcome
+from air_classifier.constants import EscalationReason, PIIKind, Provider, Tier
+from air_classifier.observability import metrics
+from air_classifier.observability.metrics import BreakerState, CacheEvent, TierOutcome
 
 CATALOGUE = (
-    "air_sentiment_requests_total",
-    "air_sentiment_request_duration_seconds",
-    "air_sentiment_tier_decisions_total",
-    "air_sentiment_escalations_total",
-    "air_sentiment_tier_duration_seconds",
-    "air_sentiment_decided_by_total",
-    "air_sentiment_llm_tokens_total",
-    "air_sentiment_llm_cost_usd_total",
-    "air_sentiment_cache_events_total",
-    "air_sentiment_breaker_state",
-    "air_sentiment_degraded_responses_total",
-    "air_sentiment_pii_redactions_total",
+    "air_classifier_requests_total",
+    "air_classifier_request_duration_seconds",
+    "air_classifier_tier_decisions_total",
+    "air_classifier_escalations_total",
+    "air_classifier_tier_duration_seconds",
+    "air_classifier_decided_by_total",
+    "air_classifier_llm_tokens_total",
+    "air_classifier_llm_cost_usd_total",
+    "air_classifier_cache_events_total",
+    "air_classifier_breaker_state",
+    "air_classifier_degraded_responses_total",
+    "air_classifier_pii_redactions_total",
 )
 
 
@@ -82,32 +82,32 @@ def test_request_buckets_reach_the_latency_budget_ceiling() -> None:
 
 def test_record_request_labels_the_key_id_not_the_key() -> None:
     labels = {"endpoint": "/v1/sentiment", "status": "200", "api_key_id": "key_01"}
-    before = sample("air_sentiment_requests_total", **labels)
+    before = sample("air_classifier_requests_total", **labels)
 
     metrics.record_request(endpoint="/v1/sentiment", status=200, api_key_id="key_01")
 
-    assert sample("air_sentiment_requests_total", **labels) == before + 1
+    assert sample("air_classifier_requests_total", **labels) == before + 1
     payload, _ = metrics.render_latest()
     assert b'api_key_id="key_01"' in payload
 
 
 def test_record_request_times_when_given_a_duration() -> None:
-    before = sample("air_sentiment_request_duration_seconds_count", endpoint="/v1/reviews")
+    before = sample("air_classifier_request_duration_seconds_count", endpoint="/v1/reviews")
 
     metrics.record_request(endpoint="/v1/reviews", status=200, api_key_id="key_01", duration_s=0.25)
 
-    assert sample("air_sentiment_request_duration_seconds_count", endpoint="/v1/reviews") == (
+    assert sample("air_classifier_request_duration_seconds_count", endpoint="/v1/reviews") == (
         before + 1
     )
 
 
 def test_record_tier_decision() -> None:
     labels = {"tier": Tier.T1_CLASSIFIER.value, "outcome": TierOutcome.ESCALATE.value}
-    before = sample("air_sentiment_tier_decisions_total", **labels)
+    before = sample("air_classifier_tier_decisions_total", **labels)
 
     metrics.record_tier_decision(Tier.T1_CLASSIFIER, TierOutcome.ESCALATE)
 
-    assert sample("air_sentiment_tier_decisions_total", **labels) == before + 1
+    assert sample("air_classifier_tier_decisions_total", **labels) == before + 1
 
 
 def test_record_escalation() -> None:
@@ -116,27 +116,27 @@ def test_record_escalation() -> None:
         "to_tier": Tier.T2_LOCAL_LLM.value,
         "reason": EscalationReason.LOW_CONFIDENCE.value,
     }
-    before = sample("air_sentiment_escalations_total", **labels)
+    before = sample("air_classifier_escalations_total", **labels)
 
     metrics.record_escalation(
         Tier.T1_CLASSIFIER, Tier.T2_LOCAL_LLM, EscalationReason.LOW_CONFIDENCE
     )
 
-    assert sample("air_sentiment_escalations_total", **labels) == before + 1
+    assert sample("air_classifier_escalations_total", **labels) == before + 1
 
 
 def test_record_decided_by() -> None:
-    before = sample("air_sentiment_decided_by_total", tier=Tier.T0_RULES.value)
+    before = sample("air_classifier_decided_by_total", tier=Tier.T0_RULES.value)
 
     metrics.record_decided_by(Tier.T0_RULES)
 
-    assert sample("air_sentiment_decided_by_total", tier=Tier.T0_RULES.value) == before + 1
+    assert sample("air_classifier_decided_by_total", tier=Tier.T0_RULES.value) == before + 1
 
 
 def test_record_llm_usage_splits_tokens_by_billing_class() -> None:
     def tokens(kind: str) -> float:
         return sample(
-            "air_sentiment_llm_tokens_total",
+            "air_classifier_llm_tokens_total",
             provider=Provider.ANTHROPIC.value,
             model="claude-haiku-4-5",
             kind=kind,
@@ -144,7 +144,7 @@ def test_record_llm_usage_splits_tokens_by_billing_class() -> None:
 
     before = {kind: tokens(kind) for kind in ("in", "out", "cache_read", "cache_write")}
     before_cost = sample(
-        "air_sentiment_llm_cost_usd_total",
+        "air_classifier_llm_cost_usd_total",
         provider=Provider.ANTHROPIC.value,
         model="claude-haiku-4-5",
     )
@@ -164,7 +164,7 @@ def test_record_llm_usage_splits_tokens_by_billing_class() -> None:
     assert tokens("cache_read") == before["cache_read"] + 4096
     assert tokens("cache_write") == before["cache_write"] + 8192
     assert sample(
-        "air_sentiment_llm_cost_usd_total",
+        "air_classifier_llm_cost_usd_total",
         provider=Provider.ANTHROPIC.value,
         model="claude-haiku-4-5",
     ) == pytest.approx(before_cost + 0.0031)
@@ -178,14 +178,14 @@ def test_record_llm_usage_skips_zero_valued_classes() -> None:
     registry = metrics.get_registry()
     assert (
         registry.get_sample_value(
-            "air_sentiment_llm_tokens_total",
+            "air_classifier_llm_tokens_total",
             {"provider": Provider.OLLAMA.value, "model": "llama3.2:3b", "kind": "cache_read"},
         )
         is None
     )
     assert (
         registry.get_sample_value(
-            "air_sentiment_llm_cost_usd_total",
+            "air_classifier_llm_cost_usd_total",
             {"provider": Provider.OLLAMA.value, "model": "llama3.2:3b"},
         )
         is None
@@ -193,22 +193,22 @@ def test_record_llm_usage_skips_zero_valued_classes() -> None:
 
 
 def test_record_cache_event() -> None:
-    before = sample("air_sentiment_cache_events_total", result=CacheEvent.HIT.value)
+    before = sample("air_classifier_cache_events_total", result=CacheEvent.HIT.value)
 
     metrics.record_cache_event(CacheEvent.HIT)
 
-    assert sample("air_sentiment_cache_events_total", result=CacheEvent.HIT.value) == before + 1
+    assert sample("air_classifier_cache_events_total", result=CacheEvent.HIT.value) == before + 1
 
 
 def test_breaker_state_is_a_gauge_not_a_counter() -> None:
     metrics.set_breaker_state(Provider.ANTHROPIC, BreakerState.OPEN)
-    assert sample("air_sentiment_breaker_state", provider=Provider.ANTHROPIC.value) == 2.0
+    assert sample("air_classifier_breaker_state", provider=Provider.ANTHROPIC.value) == 2.0
 
     metrics.set_breaker_state(Provider.ANTHROPIC, BreakerState.HALF_OPEN)
-    assert sample("air_sentiment_breaker_state", provider=Provider.ANTHROPIC.value) == 1.0
+    assert sample("air_classifier_breaker_state", provider=Provider.ANTHROPIC.value) == 1.0
 
     metrics.set_breaker_state(Provider.ANTHROPIC, BreakerState.CLOSED)
-    assert sample("air_sentiment_breaker_state", provider=Provider.ANTHROPIC.value) == 0.0
+    assert sample("air_classifier_breaker_state", provider=Provider.ANTHROPIC.value) == 0.0
 
 
 def test_breaker_state_from_name() -> None:
@@ -220,24 +220,24 @@ def test_breaker_state_from_name() -> None:
 
 def test_record_degraded() -> None:
     before = sample(
-        "air_sentiment_degraded_responses_total", reason=EscalationReason.TIER_FAILED.value
+        "air_classifier_degraded_responses_total", reason=EscalationReason.TIER_FAILED.value
     )
 
     metrics.record_degraded(EscalationReason.TIER_FAILED)
 
     assert (
-        sample("air_sentiment_degraded_responses_total", reason=EscalationReason.TIER_FAILED.value)
+        sample("air_classifier_degraded_responses_total", reason=EscalationReason.TIER_FAILED.value)
         == before + 1
     )
 
 
 def test_record_pii_redaction_counts_spans() -> None:
-    before = sample("air_sentiment_pii_redactions_total", kind=PIIKind.EMAIL.value)
+    before = sample("air_classifier_pii_redactions_total", kind=PIIKind.EMAIL.value)
 
     metrics.record_pii_redaction(PIIKind.EMAIL, count=3)
     metrics.record_pii_redaction(PIIKind.EMAIL)
 
-    assert sample("air_sentiment_pii_redactions_total", kind=PIIKind.EMAIL.value) == before + 4
+    assert sample("air_classifier_pii_redactions_total", kind=PIIKind.EMAIL.value) == before + 4
 
 
 # ── Timer ─────────────────────────────────────────────────────────────────────
@@ -245,21 +245,21 @@ def test_record_pii_redaction_counts_spans() -> None:
 
 def test_tier_timer_observes_a_duration() -> None:
     tier = Tier.T3_CLOUD_LLM.value
-    before = sample("air_sentiment_tier_duration_seconds_count", tier=tier)
-    before_sum = sample("air_sentiment_tier_duration_seconds_sum", tier=tier)
+    before = sample("air_classifier_tier_duration_seconds_count", tier=tier)
+    before_sum = sample("air_classifier_tier_duration_seconds_sum", tier=tier)
 
     with metrics.tier_timer(Tier.T3_CLOUD_LLM):
         pass
 
-    assert sample("air_sentiment_tier_duration_seconds_count", tier=tier) == before + 1
-    assert sample("air_sentiment_tier_duration_seconds_sum", tier=tier) >= before_sum
+    assert sample("air_classifier_tier_duration_seconds_count", tier=tier) == before + 1
+    assert sample("air_classifier_tier_duration_seconds_sum", tier=tier) >= before_sum
 
 
 def test_tier_timer_records_a_failed_tier_and_reraises() -> None:
     tier = Tier.T2_LOCAL_LLM.value
-    before = sample("air_sentiment_tier_duration_seconds_count", tier=tier)
+    before = sample("air_classifier_tier_duration_seconds_count", tier=tier)
 
     with pytest.raises(RuntimeError, match="boom"), metrics.tier_timer(Tier.T2_LOCAL_LLM):
         raise RuntimeError("boom")
 
-    assert sample("air_sentiment_tier_duration_seconds_count", tier=tier) == before + 1
+    assert sample("air_classifier_tier_duration_seconds_count", tier=tier) == before + 1

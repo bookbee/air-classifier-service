@@ -7,14 +7,14 @@ import functools
 
 import pytest
 
-from air_sentiment.config import ResilienceSettings
-from air_sentiment.resilience.breaker import (
+from air_classifier.config import ResilienceSettings
+from air_classifier.resilience.breaker import (
     BreakerState,
     CircuitBreaker,
     CircuitOpenError,
 )
-from air_sentiment.resilience.bulkhead import Bulkhead, BulkheadFullError
-from air_sentiment.resilience.guard import RetryPolicy, guarded
+from air_classifier.resilience.bulkhead import Bulkhead, BulkheadFullError
+from air_classifier.resilience.guard import RetryPolicy, guarded
 
 
 class RetryableError(Exception):

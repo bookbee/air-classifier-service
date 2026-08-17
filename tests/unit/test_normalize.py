@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from air_sentiment.preprocess.normalize import normalize
+from air_classifier.preprocess.normalize import normalize
 
 
 def test_nfkc_folds_compatibility_forms() -> None:

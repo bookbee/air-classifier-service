@@ -14,15 +14,15 @@ import pytest
 import respx
 from pydantic import BaseModel, SecretStr
 
-from air_sentiment.config import GatewaySettings, ProvidersSettings, Settings
-from air_sentiment.constants import Provider
-from air_sentiment.providers.base import (
+from air_classifier.config import GatewaySettings, ProvidersSettings, Settings
+from air_classifier.constants import Provider
+from air_classifier.providers.base import (
     ProviderRateLimitError,
     ProviderRefusalError,
     ProviderSchemaError,
     ProviderUnavailableError,
 )
-from air_sentiment.providers.infra_provider import InfraGatewayProvider
+from air_classifier.providers.infra_provider import InfraGatewayProvider
 
 CHAT_URL = "http://localhost:8080/v1/models/chat"
 CAPABILITIES_URL = "http://localhost:8080/v1/capabilities"
@@ -177,7 +177,7 @@ async def test_classify_unconfigured_is_unavailable() -> None:
 
 
 def test_gateway_mode_wires_infra_providers() -> None:
-    from air_sentiment.main import build_ladder
+    from air_classifier.main import build_ladder
 
     ladder = build_ladder(_settings(enabled=True))
     assert ladder.providers  # T2 local + both cloud, all gateway-backed
@@ -186,7 +186,7 @@ def test_gateway_mode_wires_infra_providers() -> None:
 
 
 def test_direct_mode_does_not_use_gateway() -> None:
-    from air_sentiment.main import build_ladder
+    from air_classifier.main import build_ladder
 
     ladder = build_ladder(_settings(enabled=False))
     assert not any(isinstance(p, InfraGatewayProvider) for p in ladder.providers)

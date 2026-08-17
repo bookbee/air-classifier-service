@@ -1,7 +1,16 @@
-# air-sentiment
+# air-classifier
 
-Sentiment analysis for the AIR platform. Takes text plus its surrounding context and returns
+Text classification for the AIR platform. Takes text plus its surrounding context and returns
 a structured, explainable verdict over a versioned REST API.
+
+Three routes share one ladder, one request envelope and one response shape, each specialising
+the same verdict for a different job:
+
+| Route | For | Adds to the verdict |
+| --- | --- | --- |
+| `/v1/sentiment` | Any text, no assumptions about where it came from | — |
+| `/v1/feedback` | Triaging inbound product and support feedback | `urgency`, `actionability`, `suggested_route` |
+| `/v1/reviews` | Marketplace reviews, prose read against the stars | `aspects`, `rating_consistency` |
 
 The service is built as a **four-tier escalation ladder**. Most real text ("Great product,
 thanks!") is trivially classifiable and a cloud LLM is two to three orders of magnitude more
@@ -23,13 +32,34 @@ A tier failure never becomes a 5xx: the best lower-tier verdict is returned with
 
 ```bash
 make install                                   # .venv + the service and its runtime extras
-export AIR_SENTIMENT__SECURITY__ALLOW_UNAUTHENTICATED=true   # local dev has no key store
-make run                                       # http://127.0.0.1:8080
+make env                                       # .env from .env.example, if absent
+make run                                       # http://127.0.0.1:8082 · Ctrl+C stops it
 ```
 
+`make run` holds the terminal and reloads on save. To run it in the background
+and drive it from anywhere: `make start`, `make status`, `make restart`,
+`make stop` — logging to `.run/service.log`. `stop` kills whatever is
+*listening* on the port, whoever started it, and never a process merely
+connected to it. A restart is needed after editing `.env`, which is read once at
+start-up.
+
+`make env` seeds a local key store holding one known development key, so a fresh
+checkout authenticates exactly the way staging and production do rather than
+running with auth switched off:
+
+| | |
+| --- | --- |
+| Raw key | `airc_local_dev_key` — send it as `X-API-Key` |
+| Stored as | `sha256(AIR_CLASSIFIER__SECURITY__HASH_SALT + raw key)` |
+| Scopes | `sentiment:read`, `admin:read` |
+
+It is valid only against the development salt, and any real deployment overrides
+both halves. `SECURITY__ALLOW_UNAUTHENTICATED` stays `false`.
+
 ```bash
-curl -s http://127.0.0.1:8080/v1/sentiment \
+curl -s http://127.0.0.1:8082/v1/sentiment \
   -H 'Content-Type: application/json' \
+  -H 'X-API-Key: airc_local_dev_key' \
   -d '{"text": "The battery life is superb but the camera is a letdown."}'
 ```
 
@@ -61,26 +91,92 @@ Without a running Ollama the ladder stops at `t1_classifier` and the trace says
 `next_tier_unavailable`; without an ONNX artifact on disk Tier 1 runs its lexicon fallback.
 Both are degradations, not failures.
 
-## The full stack
+## Dependencies
+
+This repo runs **one process and nothing else**. Redis, Ollama, Prometheus and
+Grafana are shared platform components owned by
+[air-infra](../air-infra/README.md), which starts them once for every AIR service
+rather than each repo standing up a private copy on ports the platform has
+already allocated.
 
 ```bash
-make up                                        # app + ollama + redis + prometheus + grafana
-docker compose exec ollama ollama pull llama3.2:3b
-make logs
-make down
+cd ../air-infra && make up      # redis, postgres, mongo, ollama, gateway
+make ollama-pull                # the Tier-2 model, once
 ```
 
-App on `:8080`, Prometheus on `:9090` scraping `/metrics`, Grafana on `:3000`.
+In production the question does not arise: every endpoint below is an
+environment variable, DevOps points them at managed instances, and this compose
+file is not deployed at all.
+
+| Dependency | Used for | Absent ⇒ |
+| --- | --- | --- |
+| Ollama | Tier 2 | Ladder stops at `t1_classifier`, trace says `next_tier_unavailable` |
+| Redis | Verdict cache, idempotency, quotas | Every lookup is a miss; the service is correct but colder |
+| Prometheus / Grafana | Scrapes this service's `/metrics` | No dashboards; the endpoint still serves |
+| air-infra gateway | Optional — routes T2+T3 through air-infra instead of the SDKs | Providers are called directly (the default) |
+
+Nothing here is a hard dependency: each one degrades rather than fails.
+
+```bash
+make doctor    # what is reachable, in whichever mode, and what to do about it
+```
+
+### Running it as a container
+
+```bash
+make up        # this service on :8082, joined to air-infra's air-net network
+make logs
+make down      # stops this service; air-infra's stack keeps running
+```
+
+`make up` refuses to start if air-infra is not up, naming the fix — a missing
+network is a better failure than a service that boots healthy and then times out
+on every call.
+
+### Ollama: container or native
+
+Docker Desktop on macOS has no Metal passthrough, so a containerised Ollama runs
+**CPU-only**. Running it natively is several times faster:
+
+```bash
+cd ../air-infra && OLLAMA=native make up    # frees :11434 for the host's own
+OLLAMA=native make up                       # here, so the container dials the host
+```
+
+The native inner loop (`make run` / `make start`) needs no switch — it reads
+`PROVIDERS__OLLAMA__BASE_URL` from `.env`, and `localhost:11434` addresses
+whichever instance is serving. Do not run both copies at once: they can bind
+11434 simultaneously on different stacks, and which one you reach then depends on
+resolution order. `make doctor` flags it.
+
+#### Warm the model, or the first request degrades
+
+Ollama evicts and **reloads** a model when a request asks for a different
+`num_ctx` than the resident copy. This service asks for 8192, and that reload
+routinely outlasts Tier 2's 6s timeout — so the first request after Ollama
+starts (or after any other client loaded the model at a different context size)
+comes back `decided_by: t1_classifier`, `degraded: true`, with the T2 trace entry
+at ~6000ms and `succeeded: false`.
+
+Nothing is broken when that happens, which is exactly why it misleads. Warm it
+once and the same request resolves at T2 in ~1.3s:
+
+```bash
+cd ../air-infra && make ollama-warm      # loads at num_ctx=8192, keep_alive 30m
+```
+
+`make doctor` compares the resident context size against the one this service
+requests and warns before you hit it.
 
 ## Configuration
 
-12-factor throughout: every value is an environment variable prefixed `AIR_SENTIMENT__`,
-nested with `__` — `AIR_SENTIMENT__TIERS__T1_CLASSIFIER__CONFIDENCE_FLOOR=0.85`. Escalation
+12-factor throughout: every value is an environment variable prefixed `AIR_CLASSIFIER__`,
+nested with `__` — `AIR_CLASSIFIER__TIERS__T1_CLASSIFIER__CONFIDENCE_FLOOR=0.85`. Escalation
 thresholds live in configuration on purpose: retuning the ladder's cost/accuracy balance
 must never require a deploy of new logic.
 
 [`.env.example`](.env.example) documents every key with its default and marks the secrets.
-The types live in [`src/air_sentiment/config.py`](src/air_sentiment/config.py).
+The types live in [`src/air_classifier/config.py`](src/air_classifier/config.py).
 
 ## API
 

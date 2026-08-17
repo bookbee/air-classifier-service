@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "AIR Sentiment",
-    "description": "Layered sentiment analysis with cost-aware escalation.\n\nEvery request enters at the cheapest rung of a four-tier ladder \u2014 deterministic\nrules, a statistical classifier, a locally served LLM, a metered cloud LLM \u2014 and\nclimbs only as far as the confidence, margin and complexity of the input\nactually require. The rung that decided is reported as `decided_by`, and the\nreasoning is in `escalation_trace`.\n\nA rung being unavailable is not an error. When a tier fails or a provider is\ndown, a lower rung answers and the response carries `degraded: true` with HTTP\n200. The only failure the ladder can surface is `503 no-verdict`, which means\nevery enabled rung declined.\n\nErrors are RFC 9457 `application/problem+json`.",
+    "title": "AIR Classifier",
+    "description": "Layered text classification with cost-aware escalation.\n\nThree routes share one ladder and one response envelope: `/v1/sentiment` for the\nbase verdict on any text, `/v1/feedback` for triage (urgency, actionability,\nrouting), and `/v1/reviews` for aspect scoring and rating consistency.\n\nEvery request enters at the cheapest rung of a four-tier ladder \u2014 deterministic\nrules, a statistical classifier, a locally served LLM, a metered cloud LLM \u2014 and\nclimbs only as far as the confidence, margin and complexity of the input\nactually require. The rung that decided is reported as `decided_by`, and the\nreasoning is in `escalation_trace`.\n\nA rung being unavailable is not an error. When a tier fails or a provider is\ndown, a lower rung answers and the response carries `degraded: true` with HTTP\n200. The only failure the ladder can surface is `503 no-verdict`, which means\nevery enabled rung declined.\n\nErrors are RFC 9457 `application/problem+json`.",
     "version": "0.1.0"
   },
   "paths": {
@@ -1469,7 +1469,7 @@
           "service": {
             "type": "string",
             "title": "Service",
-            "default": "air-sentiment"
+            "default": "air-classifier"
           },
           "version": {
             "type": "string",
