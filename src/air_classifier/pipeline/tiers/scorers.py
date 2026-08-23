@@ -1,19 +1,26 @@
 """Pluggable scoring backends for Tier 1.
 
 The tier owns the policy-facing behaviour; this module owns the arithmetic that
-turns text into a distribution over :data:`SCORED_LABELS`. Two backends
+turns text into a distribution over :data:`SCORED_LABELS`. Three backends
 implement :class:`ScorerBackend`:
 
-* :class:`OnnxScorer` — a quantised sentiment head run on CPU. It is the
-  accurate one, and it is optional: the model artifact is baked into the Docker
-  image and the runtime lives behind the ``onnx`` extra, so neither is present
-  in a plain checkout.
+* :class:`ZeroShotOnnxScorer` — a quantised DeBERTa-v3 NLI head run on CPU,
+  scoring all four labels directly by entailment against a hypothesis per
+  label. The default when an ONNX artifact is present; see the class
+  docstring for why this replaced a plain sequence-classification head.
+* :class:`OnnxScorer` — a two- or three-class sequence-classification head
+  (the SST-2 family). Kept working, not the default: a deployment that already
+  baked in that artifact loses nothing by staying there, and the escalation
+  ladder does not care which of the two produced a verdict.
 * :class:`LexiconScorer` — pure Python, no artifact, no wheel, always available.
 
-Which one is live is a deployment fact, not a code path the rest of the service
-knows about: :func:`build_scorer` picks the best one that actually loaded, and
-the tier degrades in accuracy rather than disappearing when the artifact is
-missing. That is the whole reason the backend is a protocol.
+Both ONNX backends are optional: the model artifact is baked into the Docker
+image and the runtime lives behind the ``onnx`` extra, so neither is present in
+a plain checkout. Which one is live is a deployment fact, not a code path the
+rest of the service knows about: :func:`build_scorer` picks the best one that
+actually loaded and matches ``classifier.scorer_kind``, and the tier degrades
+in accuracy rather than disappearing when the artifact is missing. That is the
+whole reason the backend is a protocol.
 
 Scoring here is deliberately synchronous. It is CPU work, and the caller — not
 the callee — decides how to get it off the event loop.
@@ -41,6 +48,7 @@ __all__ = [
     "ScoreResult",
     "ScorerBackend",
     "ScorerUnavailableError",
+    "ZeroShotOnnxScorer",
     "apply_temperature",
     "blend",
     "build_scorer",
@@ -308,15 +316,17 @@ class LexiconScorer:
         return ScoreResult.from_probabilities(lexicon_distribution(score_text(text)))
 
 
-# ── ONNX backend ──────────────────────────────────────────────────────────────
+# ── ONNX backends ─────────────────────────────────────────────────────────────
 
 #: Bump alongside a change to the inference path, independently of the artifact.
 ONNX_SCORER_VERSION: Final[str] = "1.0"
 
-#: How a model's output columns map onto labels, keyed by how many there are.
-#: Two-class heads (the SST-2 family) say nothing about NEUTRAL or MIXED, and
-#: this leaves them at zero rather than inventing mass for them — the lexicon
-#: blend in the tier is where those two classes come from.
+#: How a sequence-classification model's output columns map onto labels, keyed
+#: by how many there are. Two-class heads (the SST-2 family) say nothing about
+#: NEUTRAL or MIXED, and this leaves them at zero rather than inventing mass
+#: for them — the lexicon blend in the tier is where those two classes come
+#: from. Not used by :class:`ZeroShotOnnxScorer`, whose 2-class head means
+#: something else entirely (entailment/not-entailment) — see its docstring.
 _ONNX_LABEL_ORDERS: Final[dict[int, tuple[Label, ...]]] = {
     2: (Label.NEGATIVE, Label.POSITIVE),
     3: (Label.NEGATIVE, Label.NEUTRAL, Label.POSITIVE),
@@ -339,8 +349,65 @@ def _import_optional(name: str) -> Any:
     return importlib.import_module(name)
 
 
+@dataclass(frozen=True, slots=True)
+class _OnnxSession:
+    """A loaded model + tokenizer, ready for either ONNX backend to score with."""
+
+    session: Any
+    tokenizer: Any
+    numpy: Any
+    input_names: frozenset[str]
+
+
+def _load_onnx_session(
+    model_path: Path | None, tokenizer_path: Path | None
+) -> _OnnxSession | None:
+    """Load the artifact both ONNX backends need, or ``None`` on any failure.
+
+    Shared rather than duplicated in each backend's ``__init__``: the loading
+    and error-handling is identical regardless of what the model's output
+    means, which is the one thing that differs between them.
+    """
+    if model_path is None or not model_path.is_file():
+        _log.info("classifier.onnx_artifact_absent", model_path=str(model_path))
+        return None
+
+    resolved_tokenizer_path = tokenizer_path or model_path.parent / _DEFAULT_TOKENIZER_FILE
+    if not resolved_tokenizer_path.is_file():
+        _log.warning(
+            "classifier.onnx_tokenizer_absent", tokenizer_path=str(resolved_tokenizer_path)
+        )
+        return None
+
+    try:
+        onnxruntime = _import_optional("onnxruntime")
+        tokenizers = _import_optional("tokenizers")
+        numpy = _import_optional("numpy")
+    except ImportError as exc:
+        _log.info("classifier.onnx_runtime_absent", error=str(exc))
+        return None
+
+    try:
+        options = onnxruntime.SessionOptions()
+        # One thread per inference: the service already runs many scorings
+        # concurrently through the tier's worker pool, so intra-op parallelism
+        # here buys nothing and contends with everything.
+        options.intra_op_num_threads = 1
+        options.inter_op_num_threads = 1
+        session = onnxruntime.InferenceSession(
+            str(model_path), options, providers=["CPUExecutionProvider"]
+        )
+        tokenizer = tokenizers.Tokenizer.from_file(str(resolved_tokenizer_path))
+    except Exception as exc:  # onnxruntime raises its own unrelated hierarchy
+        _log.warning("classifier.onnx_load_failed", error=str(exc), model_path=str(model_path))
+        return None
+
+    input_names = frozenset(spec.name for spec in session.get_inputs())
+    return _OnnxSession(session=session, tokenizer=tokenizer, numpy=numpy, input_names=input_names)
+
+
 class OnnxScorer:
-    """Quantised sentiment head executed on CPU through onnxruntime.
+    """Quantised sequence-classification head executed on CPU through onnxruntime.
 
     Construction is the only place that can fail: everything optional is
     imported and loaded here, and any failure leaves :attr:`available` false
@@ -355,54 +422,23 @@ class OnnxScorer:
         config = settings.classifier
         self.name = _onnx_name(config.model_path)
         self.available = False
-        self._session: Any = None
-        self._tokenizer: Any = None
-        self._numpy: Any = None
-        self._input_names: frozenset[str] = frozenset()
+        self._loaded: _OnnxSession | None = None
 
-        model_path = config.model_path
-        if model_path is None or not model_path.is_file():
-            _log.info("classifier.onnx_artifact_absent", model_path=str(model_path))
+        loaded = _load_onnx_session(config.model_path, config.tokenizer_path)
+        if loaded is None:
             return
-
-        tokenizer_path = config.tokenizer_path or model_path.parent / _DEFAULT_TOKENIZER_FILE
-        if not tokenizer_path.is_file():
-            _log.warning("classifier.onnx_tokenizer_absent", tokenizer_path=str(tokenizer_path))
-            return
-
-        try:
-            onnxruntime = _import_optional("onnxruntime")
-            tokenizers = _import_optional("tokenizers")
-            self._numpy = _import_optional("numpy")
-        except ImportError as exc:
-            _log.info("classifier.onnx_runtime_absent", error=str(exc))
-            return
-
-        try:
-            options = onnxruntime.SessionOptions()
-            # One thread per inference: the service already runs many scorings
-            # concurrently through the tier's worker pool, so intra-op
-            # parallelism here buys nothing and contends with everything.
-            options.intra_op_num_threads = 1
-            options.inter_op_num_threads = 1
-            self._session = onnxruntime.InferenceSession(
-                str(model_path), options, providers=["CPUExecutionProvider"]
-            )
-            self._tokenizer = tokenizers.Tokenizer.from_file(str(tokenizer_path))
-        except Exception as exc:  # onnxruntime raises its own unrelated hierarchy
-            _log.warning("classifier.onnx_load_failed", error=str(exc), model_path=str(model_path))
-            return
-
-        self._input_names = frozenset(spec.name for spec in self._session.get_inputs())
+        self._loaded = loaded
         self.available = True
-        _log.info("classifier.onnx_loaded", backend=self.name, model_path=str(model_path))
+        _log.info("classifier.onnx_loaded", backend=self.name, model_path=str(config.model_path))
 
     def score(self, text: str) -> ScoreResult:
-        if not self.available:
+        if self._loaded is None:
             raise ScorerUnavailableError(f"{self.name} did not load")
+        numpy = self._loaded.numpy
+        tokenizer = self._loaded.tokenizer
+        input_names = self._loaded.input_names
 
-        numpy = self._numpy
-        encoding = self._tokenizer.encode(text)
+        encoding = tokenizer.encode(text)
         ids = encoding.ids[:_ONNX_MAX_TOKENS]
         mask = encoding.attention_mask[:_ONNX_MAX_TOKENS]
 
@@ -412,11 +448,11 @@ class OnnxScorer:
         }
         # Single-segment classification, so the type ids are all zero — but a
         # BERT export still declares the input and refuses to run without it.
-        if "token_type_ids" in self._input_names:
+        if "token_type_ids" in input_names:
             feeds["token_type_ids"] = numpy.zeros((1, len(ids)), dtype=numpy.int64)
 
-        declared = {name: value for name, value in feeds.items() if name in self._input_names}
-        outputs = self._session.run(None, declared)
+        declared = {name: value for name, value in feeds.items() if name in input_names}
+        outputs = self._loaded.session.run(None, declared)
         logits = [float(value) for value in outputs[0][0]]
 
         order = _ONNX_LABEL_ORDERS.get(len(logits))
@@ -428,6 +464,116 @@ class OnnxScorer:
         return ScoreResult.from_probabilities(softmax(dict(zip(order, logits, strict=True))))
 
 
+#: What each label means for the purpose of an entailment check. Written as a
+#: claim about the text, matching the "This example is {}." style templates
+#: the model was trained to score — deviating from that phrasing measurably
+#: hurts a zero-shot NLI model's calibration, so this is not free-form.
+_HYPOTHESIS_TEMPLATES: Final[dict[Label, str]] = {
+    Label.POSITIVE: "This text expresses a positive sentiment.",
+    Label.NEGATIVE: "This text expresses a negative sentiment.",
+    Label.NEUTRAL: "This text expresses a neutral sentiment, with no positive or negative opinion.",
+    Label.MIXED: "This text expresses mixed sentiment, both positive and negative.",
+}
+
+#: Row order fixed once so the batch built in `score` and the labels zipped
+#: onto its output can never drift apart.
+_HYPOTHESIS_ORDER: Final[tuple[Label, ...]] = tuple(_HYPOTHESIS_TEMPLATES)
+
+#: `MoritzLaurer/deberta-v3-base-zeroshot-v1`'s id2label — entailment first.
+#: Fixed by the checkpoint, not configurable: this is what its two output
+#: columns mean, not a convention this module chose.
+_ENTAILMENT_COLUMN: Final[int] = 0
+
+
+class ZeroShotOnnxScorer:
+    """Zero-shot sentiment via NLI entailment, executed on CPU through onnxruntime.
+
+    The default Tier-1 backend. Where :class:`OnnxScorer` needs a head
+    fine-tuned for exactly this label set, this one needs a head fine-tuned
+    for *entailment* — "does the premise entail the hypothesis" — and answers
+    an arbitrary classification question by templating each candidate label
+    into a hypothesis and checking whether the text entails it. That is the
+    standard technique behind HF's ``zero-shot-classification`` pipeline
+    (Yin et al., 2019; see also arxiv.org/abs/2312.17543 for why it composes
+    well with an encoder this size), and it earns its place here for a
+    concrete reason a fine-tuned head does not have: it can score `MIXED`
+    directly, rather than needing a lexicon blend to manufacture it from a
+    two- or three-class head that was never trained to express it.
+
+    One inference call scores all four labels — the batch dimension is the
+    label, not separate texts — because they share nothing else about the
+    request and this is CPU work inside Tier 1's tight timeout budget.
+    """
+
+    name: str
+    available: bool
+
+    def __init__(self, settings: Settings) -> None:
+        config = settings.classifier
+        self.name = f"{_onnx_name(config.model_path)}-zeroshot"
+        self.available = False
+        self._loaded: _OnnxSession | None = None
+
+        loaded = _load_onnx_session(config.model_path, config.tokenizer_path)
+        if loaded is None:
+            return
+        self._loaded = loaded
+        self.available = True
+        _log.info("classifier.onnx_loaded", backend=self.name, model_path=str(config.model_path))
+
+    def score(self, text: str) -> ScoreResult:
+        if self._loaded is None:
+            raise ScorerUnavailableError(f"{self.name} did not load")
+        numpy = self._loaded.numpy
+        tokenizer = self._loaded.tokenizer
+        input_names = self._loaded.input_names
+
+        # Each row is (premise, hypothesis) for one candidate label. Encoded
+        # individually rather than via `encode_batch` + `enable_padding`,
+        # which would require knowing this tokenizer's pad token id; padding
+        # to 0 by hand and masking it out via `attention_mask` is correct
+        # regardless of what token id 0 happens to mean, because a masked
+        # position never enters the attention computation.
+        encodings = [
+            tokenizer.encode(text, _HYPOTHESIS_TEMPLATES[label]) for label in _HYPOTHESIS_ORDER
+        ]
+        width = min(_ONNX_MAX_TOKENS, max(len(e.ids) for e in encodings))
+
+        ids = numpy.zeros((len(encodings), width), dtype=numpy.int64)
+        mask = numpy.zeros((len(encodings), width), dtype=numpy.int64)
+        type_ids = numpy.zeros((len(encodings), width), dtype=numpy.int64)
+        for row, encoding in enumerate(encodings):
+            length = min(width, len(encoding.ids))
+            ids[row, :length] = encoding.ids[:length]
+            mask[row, :length] = encoding.attention_mask[:length]
+            type_ids[row, :length] = encoding.type_ids[:length]
+
+        feeds: dict[str, Any] = {"input_ids": ids, "attention_mask": mask}
+        if "token_type_ids" in input_names:
+            feeds["token_type_ids"] = type_ids
+
+        declared = {name: value for name, value in feeds.items() if name in input_names}
+        outputs = self._loaded.session.run(None, declared)
+        rows = outputs[0]
+        if rows.shape[-1] != 2:
+            raise ScorerUnavailableError(
+                f"{self.name} produced a {rows.shape[-1]}-class head; "
+                "expected an entailment/not-entailment NLI head with 2"
+            )
+
+        entailment_logits = {
+            label: float(rows[row, _ENTAILMENT_COLUMN])
+            for row, label in enumerate(_HYPOTHESIS_ORDER)
+        }
+        # Softmax *across* labels' entailment logits, not within each pair's
+        # own two columns — the within-pair softmax says "is this hypothesis
+        # true at all," the across-label one says "which hypothesis is truest
+        # relative to the others," and it is the second question a single-
+        # label classifier needs answered. Same procedure HF's zero-shot
+        # pipeline uses in single-label mode.
+        return ScoreResult.from_probabilities(softmax(entailment_logits))
+
+
 def _onnx_name(model_path: Path | None) -> str:
     """Version string identifying the artifact, not just the code path."""
     if model_path is None:
@@ -437,17 +583,26 @@ def _onnx_name(model_path: Path | None) -> str:
 
 # ── Selection ─────────────────────────────────────────────────────────────────
 
+#: `ClassifierSettings.scorer_kind` values, mapped onto the backend they build.
+_ONNX_BACKENDS: Final[dict[str, type[OnnxScorer | ZeroShotOnnxScorer]]] = {
+    "zero_shot_nli": ZeroShotOnnxScorer,
+    "sequence_classification": OnnxScorer,
+}
+
 
 def build_scorer(settings: Settings) -> ScorerBackend:
     """Return the best Tier-1 backend that actually loaded.
 
     ONNX wins when both its artifact and its runtime are present; otherwise the
-    lexicon takes over. The fallback is logged at warning level because it is a
-    quiet, permanent accuracy loss that is invisible from the outside: the
-    service keeps answering, the tier keeps reporting verdicts, and only the
-    confidence numbers get worse.
+    lexicon takes over. Which ONNX backend is even attempted is
+    ``classifier.scorer_kind`` — the two are not interchangeable at the same
+    artifact, so this is not autodetected. The fallback is logged at warning
+    level because it is a quiet, permanent accuracy loss that is invisible
+    from the outside: the service keeps answering, the tier keeps reporting
+    verdicts, and only the confidence numbers get worse.
     """
-    onnx = OnnxScorer(settings)
+    backend_cls = _ONNX_BACKENDS[settings.classifier.scorer_kind]
+    onnx = backend_cls(settings)
     if onnx.available:
         _log.info("classifier.backend_selected", backend=onnx.name)
         return onnx

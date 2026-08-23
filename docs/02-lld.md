@@ -3,7 +3,9 @@
 **Status:** Draft for review · **Companion docs:** [Plan](00-plan.md) · [HLD](01-hld.md)
 
 This document is the implementation contract. Code should follow it; where it turns out to
-be wrong, the document gets amended rather than silently diverged from.
+be wrong, the document gets corrected rather than silently diverged from. §12 keeps a short
+log of the corrections that mattered enough to leave a trace of — this section itself
+describes the system as it stands today, not as it was first drafted.
 
 ---
 
@@ -16,36 +18,39 @@ air-classifier/
 ├── docker-compose.yml             # this service only; deps come from air-infra
 ├── Makefile                       # dev / test / lint / run / image targets
 ├── .env.example                   # every settings key, documented
-├── docs/                          # 00-plan · 01-hld · 02-lld · api · operations
+├── docs/                          # 00-plan · 01-hld · 02-lld
+├── scripts/
+│   ├── fetch_model.py             # downloads a pinned, pre-built ONNX artifact
+│   └── export_zeroshot_model.py   # produces one from scratch (torch + optimum)
 └── src/air_classifier/
     ├── __init__.py                # __version__
     ├── main.py                    # create_app(), lifespan, middleware wiring
     ├── config.py                  # Settings (pydantic-settings), get_settings()
-    ├── constants.py               # Tier / Label / Provider enums
+    ├── constants.py                # Tier / Label / Tone / Topic / Intent / ... enums
     │
     ├── api/
-    │   ├── deps.py                # api_key_auth, rate_limit, request_context
+    │   ├── deps.py                # api_key_auth, rate_limit, idempotency
     │   ├── errors.py              # AppError hierarchy + RFC 9457 handlers
     │   ├── middleware.py          # request-id, access log, timing, body-size cap
     │   └── v1/
-    │       ├── router.py          # aggregates the v1 routers
-    │       ├── sentiment.py       # POST /v1/sentiment(/batch)
-    │       ├── feedback.py        # POST /v1/feedback(/batch)
-    │       ├── reviews.py         # POST /v1/reviews(/batch)
-    │       └── system.py          # /v1/health, /v1/ready, /v1/capabilities
+    │       ├── router.py          # request-scoped AnalysisService, error catalogue, aggregation
+    │       ├── classify.py        # POST /v1/classify(/batch) — the whole surface
+    │       └── system.py          # /v1/health, /v1/ready, /v1/capabilities, /metrics
     │
     ├── schemas/
-    │   ├── common.py              # Label, Tier, RequestContext, Options, Emotion, Aspect
+    │   ├── common.py              # Label, Tier, Options, LabeledScore[T], Emotion, Aspect, ...
     │   ├── verdict.py             # TierVerdict, EscalationStep, LLMSentimentOutput
-    │   ├── requests.py            # SentimentRequest, FeedbackRequest, ReviewRequest (+batch)
-    │   └── responses.py           # SentimentResponse, FeedbackResponse, ReviewResponse
+    │   ├── classify.py            # ClassifyRequest, ClassificationResponse (+ batch envelopes)
+    │   └── responses.py           # HealthResponse, ReadyResponse — system endpoints only
     │
     ├── pipeline/
     │   ├── orchestrator.py        # Orchestrator.run(): the ladder
     │   ├── policy.py              # EscalationPolicy.decide()
+    │   ├── service.py             # HTTP↔ladder seam: preprocess, cache, shape, batch isolation
     │   ├── features.py            # ComplexityFeatures extraction
     │   └── tiers/
     │       ├── base.py            # Tier protocol + TierContext
+    │       ├── scorers.py         # Tier-1 backends: ZeroShotOnnxScorer, OnnxScorer, LexiconScorer
     │       ├── t0_rules.py
     │       ├── t1_classifier.py
     │       ├── t2_local_llm.py
@@ -53,11 +58,8 @@ air-classifier/
     │
     ├── providers/
     │   ├── base.py                # LLMProvider protocol, ProviderResult
-    │   ├── anthropic_provider.py
-    │   ├── openai_provider.py
-    │   ├── ollama_provider.py
-    │   ├── registry.py            # routing + failover + health
-    │   └── prompts/               # system.md, rubric.md, fewshot.md, per-resource.md
+    │   ├── air_llm_provider.py    # the one adapter: POST /v1/inference on air-llm
+    │   └── prompts/                # system.md, system_compact.md, loader.py
     │
     ├── preprocess/
     │   ├── normalize.py           # unicode NFKC, whitespace, control chars, length cap
@@ -66,28 +68,28 @@ air-classifier/
     │   └── lexicon.py             # polarity/negation/intensifier/emoji tables
     │
     ├── cache/
-    │   ├── base.py                # CacheBackend protocol
-    │   ├── memory.py              # TTLCache, default
-    │   └── redis.py               # optional, config-selected
+    │   ├── base.py                # CacheBackend protocol, verdict_cache_key
+    │   ├── memory.py               # TTLCache, default
+    │   ├── redis.py                # optional, config-selected
+    │   └── factory.py
     │
     ├── resilience/
     │   ├── breaker.py             # CircuitBreaker
     │   ├── bulkhead.py            # bounded-concurrency semaphore
-    │   └── guard.py               # @guarded: timeout + retry + breaker + bulkhead
+    │   └── guard.py               # guarded(): timeout + retry + breaker + bulkhead composed
     │
     ├── observability/
     │   ├── logging.py             # structlog config, context binding
     │   ├── metrics.py             # Prometheus registry + metric objects
-    │   ├── tracing.py             # OpenTelemetry setup
-    │   └── cost.py                # CostMeter, price table
+    │   └── tracing.py             # OpenTelemetry setup
     │
     └── security/
         ├── api_keys.py            # ApiKeyStore, hashing, scopes, per-key tier ceiling
-        └── quotas.py              # token bucket rate limiter
+        └── quotas.py               # token bucket rate limiter
 ```
 
-**Tests** mirror the source tree under `tests/`, split into `unit/`, `integration/`
-(testcontainers for Redis/Ollama), and `contract/` (schema snapshots + golden fixtures).
+**Tests** mirror the source tree under `tests/`, split into `unit/`, `integration/` (needs
+Redis and a reachable air-llm), and `contract/` (OpenAPI snapshot + golden response fixtures).
 
 ## 2. Core enums and protocols
 
@@ -108,7 +110,10 @@ class Label(StrEnum):
     NEUTRAL  = "neutral";  MIXED    = "mixed"; UNKNOWN = "unknown"
 
 class Provider(StrEnum):
-    ANTHROPIC = "anthropic"; OPENAI = "openai"; OLLAMA = "ollama"
+    ANTHROPIC = "anthropic"; OPENAI = "openai"; GEMINI = "gemini"; OLLAMA = "ollama"
+
+# Also here: Tone, Topic, Intent, RoutingPriority, Urgency, Actionability,
+# RatingAgreement — the closed vocabularies §3's response models use.
 ```
 
 ```python
@@ -117,13 +122,13 @@ class Provider(StrEnum):
 class TierContext(BaseModel):
     """Everything a tier needs, assembled once by the orchestrator."""
     request_id: str
-    resource: Literal["sentiment", "feedback", "reviews"]
     text: str                       # normalised, possibly redacted
     original_length: int
     language: LanguageInfo
     features: ComplexityFeatures
     context: dict[str, Any]
     metadata: dict[str, Any]
+    resource_fields: dict[str, Any] # the caller's optional fields — rating, channel, ...
     options: Options
     prior_verdicts: list[TierVerdict]
     deadline_at: float              # monotonic clock deadline for the whole request
@@ -133,6 +138,7 @@ class Tier(Protocol):
     tier: Tier
     model_version: str
     async def is_available(self) -> bool: ...
+    async def unavailable_reason(self) -> str | None: ...  # why, when unavailable — feeds /v1/ready's detail
     async def analyse(self, ctx: TierContext) -> TierVerdict: ...
 ```
 
@@ -142,6 +148,10 @@ class Tier(Protocol):
 class LLMProvider(Protocol):
     name: Provider
     async def health(self) -> bool: ...
+    @property
+    def configured(self) -> bool: ...       # credentials/endpoint present; no I/O
+    @property
+    def health_detail(self) -> str | None: ...  # why the last health() failed, or None
     async def classify(
         self,
         *,
@@ -152,6 +162,7 @@ class LLMProvider(Protocol):
         max_tokens: int,
         cache_prefix: bool = True,
     ) -> ProviderResult: ...
+    async def aclose(self) -> None: ...
 
 class ProviderResult(BaseModel):
     parsed: BaseModel               # validated instance of output_model
@@ -165,9 +176,11 @@ class ProviderResult(BaseModel):
     cost_usd: float
 ```
 
-A single `LLMProvider` protocol covers both the local and the cloud tiers. Ollama is not a
-special case — it is one more provider that happens to be free and nearby, which means
-Tier 2 and Tier 3 share their prompt-building and validation code entirely.
+A single `LLMProvider` protocol covers both the local and the cloud tiers. The local tier is
+not a special case — it is a model that happens to be free and nearby, with which concrete
+model that even is left entirely to air-llm's own routing — which means Tier 2 and Tier 3
+share their prompt-building and validation code entirely (though not their system prompt —
+§6).
 
 ## 3. Pydantic contracts
 
@@ -178,7 +191,7 @@ class Options(BaseModel):
     model_config = ConfigDict(extra="forbid")
     min_tier: Tier | None = None
     max_tier: Tier = Tier.T3_CLOUD_LLM
-    latency_budget_ms: int = Field(default=5000, ge=50, le=30_000)
+    latency_budget_ms: int = Field(default=8000, ge=50, le=30_000)
     max_cost_usd: float = Field(default=0.05, ge=0.0)
     include_trace: bool = True
     redact_pii: bool = True
@@ -195,6 +208,11 @@ class SentimentResult(BaseModel):
     polarity: float = Field(ge=-1.0, le=1.0)
     confidence: float = Field(ge=0.0, le=1.0)
     rationale: str | None = Field(default=None, max_length=500)
+
+class LabeledScore[T](BaseModel):
+    """A closed-vocabulary label with a confidence — tone, urgency, intent, each topic."""
+    label: T
+    confidence: float = Field(ge=0.0, le=1.0)
 
 class Aspect(BaseModel):
     name: str; label: Label; confidence: float = Field(ge=0.0, le=1.0)
@@ -214,6 +232,9 @@ class TierVerdict(BaseModel):
     result: SentimentResult
     aspects: list[Aspect] = []
     emotions: list[Emotion] = []
+    tone: LabeledScore[Tone] | None = None       # LLM tiers only, when asked
+    topics: list[LabeledScore[Topic]] = []       # LLM tiers only, when asked
+    intent: LabeledScore[Intent] | None = None   # LLM tiers only, when asked
     label_margin: float = 0.0          # top-1 minus top-2 probability
     latency_ms: float
     succeeded: bool = True
@@ -225,47 +246,81 @@ class EscalationStep(BaseModel):
     label: Label
     confidence: float
     latency_ms: float
-    escalated_because: str | None      # comma-joined reason codes; None = terminal
+    succeeded: bool
+    escalated_because: str | None      # comma-joined reason codes; None = terminal,
+                                        # except `next_tier_unavailable` — a capacity
+                                        # gap is terminal too but stays visible here
+                                        # rather than collapsing to null like other
+                                        # terminal reasons, so a caller can tell "the
+                                        # ladder was satisfied" from "it wanted more
+                                        # and couldn't get it" (§5 rule 4, §4)
 ```
 
-### Requests
+### The request
+
+One shape for the whole surface. Every field beyond `text` is optional and read only where
+it is relevant — a caller with a star rating fills `rating`; a caller with neither fills
+neither.
 
 ```python
-class BaseAnalysisRequest(BaseModel):
+class ClassifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(min_length=1, max_length=20_000)
     context: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     options: Options = Field(default_factory=Options)
 
-class SentimentRequest(BaseAnalysisRequest): ...
-
-class FeedbackRequest(BaseAnalysisRequest):
     channel: str | None = None            # app | email | support | survey | ...
     user_segment: str | None = None
     subject: str | None = Field(default=None, max_length=500)
 
-class ReviewRequest(BaseAnalysisRequest):
-    rating: float | None = Field(default=None, ge=0, le=10)
-    rating_scale_max: float = 5.0
+    rating: float | None = Field(default=None, ge=0)
+    rating_scale_max: float = Field(default=5.0, gt=0, le=100)
     product_id: str | None = None
     verified_purchase: bool | None = None
     title: str | None = Field(default=None, max_length=500)
 
-class BatchRequest[T](BaseModel):
-    items: list[T] = Field(min_length=1, max_length=100)
+    @model_validator(mode="after")
+    def _rating_within_scale(self) -> Self:
+        if self.rating is not None and self.rating > self.rating_scale_max:
+            raise ValueError("rating cannot exceed rating_scale_max")
+        return self
+
+class ClassifyBatchRequest(BaseModel):
+    items: list[ClassifyRequest] = Field(min_length=1, max_length=1000)
     options: Options | None = None        # per-batch default, item options win
 ```
 
-### Responses
+### The response
 
 ```python
-class BaseAnalysisResponse(BaseModel):
+class RoutingInfo(BaseModel):
+    queue: str | None = None
+    priority: RoutingPriority          # P1 (critical) .. P4 (low) — a rank mapping of urgency
+
+class ModelInfo(BaseModel):
+    name: str                          # the deciding tier's own model_version
+    version: str                       # this service's own release
+
+class ClassificationResponse(BaseModel):
     request_id: str
-    sentiment: SentimentResult
+
+    sentiment: SentimentResult                    # label, polarity, confidence, rationale
+    tone: LabeledScore[Tone] | None = None         # LLM-only — see §6
+    urgency: LabeledScore[Urgency]                 # heuristic, always present
+    topics: list[LabeledScore[Topic]] = []         # LLM-only
+    intent: LabeledScore[Intent] | None = None     # LLM-only
+    routing: RoutingInfo                           # heuristic, always present
+    requires_human: bool                           # heuristic, always present
+    actionability: Actionability                   # heuristic, always present
+
+    aspects: list[Aspect] = []                     # LLM-only, per-facet sentiment
+    rating_consistency: RatingConsistency | None = None   # only when `rating` was given
     emotions: list[Emotion] = []
-    aspects: list[Aspect] = []
+
     language: LanguageInfo
+    model: ModelInfo
+
     decided_by: Tier
     degraded: bool = False
     escalation_trace: list[EscalationStep] = []
@@ -274,16 +329,15 @@ class BaseAnalysisResponse(BaseModel):
     cached: bool = False
     latency_ms: float
     model_versions: dict[str, str] = {}
-
-class FeedbackResponse(BaseAnalysisResponse):
-    urgency: Literal["low", "medium", "high", "critical"]
-    actionability: Literal["none", "informational", "actionable", "blocking"]
-    suggested_route: str | None = None
-
-class ReviewResponse(BaseAnalysisResponse):
-    rating_consistency: RatingConsistency | None = None   # agrees | prose_more_positive |
-                                                          # prose_more_negative + delta
+    metadata: dict[str, Any] = {}
 ```
+
+`tone`, `topics`, `intent` and `aspects` need real language understanding no lexicon or
+classifier head can supply — they are populated only when the ladder reached an LLM tier that
+was asked to fill them (§6's prompt framing always asks). `urgency`, `routing`,
+`requires_human` and `actionability` are the opposite: deterministic heuristics computed in
+`pipeline/service.py` from whichever verdict decided, present on every response regardless of
+which rung answered. `rating_consistency` is `None` unless the request carried a `rating`.
 
 ### LLM output model (Tiers 2 and 3)
 
@@ -302,6 +356,10 @@ class LLMSentimentOutput(BaseModel):
     aspects: list[Aspect] = Field(default_factory=list, max_length=10)
     sarcasm_detected: bool = False
     language_code: str
+    # Optional; filled only when the prompt's task framing asks for them.
+    tone: LabeledScore[Tone] | None = None
+    topics: list[LabeledScore[Topic]] = Field(default_factory=list, max_length=6)
+    intent: LabeledScore[Intent] | None = None
 ```
 
 Structured-output schema support excludes recursion and numeric range constraints, so
@@ -313,45 +371,53 @@ bounded retry before escalation.
 
 ```python
 async def run(self, ctx: TierContext) -> OrchestrationResult:
+    ladder = self._ladder_for(ctx)      # enabled tiers within [min_tier, max_tier]
     verdicts: list[TierVerdict] = []
     steps:    list[EscalationStep] = []
     degraded = False
 
-    for tier in self._enabled_tiers_within(ctx.options):
-        if tier.rank < (ctx.options.min_tier.rank if ctx.options.min_tier else 0):
-            continue                                   # floor: skip cheaper tiers
+    position = 0
+    while position < len(ladder):
+        tier = ladder[position]
+        timeout_s = min(self._settings.tiers.for_tier(tier.tier).timeout_ms, ctx.remaining_ms)
+        if timeout_s <= 0:
+            break                                       # out of budget; stop, do not fail
 
-        with tracer.span(f"tier.{tier.tier}"), metrics.tier_timer(tier.tier):
-            try:
-                verdict = await asyncio.wait_for(
-                    tier.analyse(ctx), timeout=self._budget_for(tier, ctx))
-            except (TimeoutError, TierError) as exc:
-                verdict = TierVerdict.failed(tier, exc)
-                degraded = True
-
+        verdict = await self._analyse(tier, ctx, timeout_s)  # timeout/error → failed verdict
+        degraded = degraded or not verdict.succeeded
         verdicts.append(verdict)
-        ctx = ctx.model_copy(update={"prior_verdicts": verdicts,
-                                     "cost_spent_usd": ctx.cost_spent_usd + verdict.usage.cost_usd})
+        ctx = ctx.with_verdict(verdict)
 
-        decision = self.policy.decide(verdict, ctx)
-        steps.append(EscalationStep.from_(verdict, decision))
-        metrics.record_decision(tier.tier, decision)
+        # Scans forward past any dead rung to the nearest one that can serve —
+        # not just the adjacent one. See §12's note on why that distinction matters.
+        next_position = await self._next_available_position(ladder, position + 1)
+        decision = self.policy.decide(verdict, ctx, next_available=next_position is not None)
+        steps.append(EscalationStep.build(verdict, decision))
+
+        # A verdict that succeeded but was not good enough, with nothing further
+        # up the ladder to hand it to, is a capacity gap rather than an outright
+        # failure — but the caller is still getting a worse answer than the
+        # ladder's own thresholds call acceptable, so it counts as degraded too.
+        if not decision.escalate and decision.primary_reason is NEXT_TIER_UNAVAILABLE:
+            degraded = True
+            _log.warning("ladder.capacity_gap", stopped_at=tier.tier.value, ...)
 
         if not decision.escalate:
             break
+        position = next_position
 
     best = self.policy.select_best(verdicts)
     if best is None:
         raise NoVerdictError()                          # the only path to a 5xx
-    return OrchestrationResult(best=best, verdicts=verdicts,
-                               steps=steps, degraded=degraded)
+    return OrchestrationResult(best=best, verdicts=verdicts, steps=steps, degraded=degraded)
 ```
 
-Three properties worth noting. The loop is **tier-agnostic** — it never names a concrete
-tier. `ctx` is **immutably threaded**, so a tier cannot corrupt state for its successors.
-And a tier failure is *not* an exception escaping the loop: it becomes a failed verdict, the
+Four properties worth noting. The loop is **tier-agnostic** — it never names a concrete
+tier. `ctx` is **immutably threaded**, so a tier cannot corrupt state for its successors. A
+tier failure is *not* an exception escaping the loop: it becomes a failed verdict, the
 ladder continues, and `degraded` is set — which is exactly the "degrade, don't fail"
-principle made mechanical.
+principle made mechanical. And `degraded` has a second trigger beyond outright failure: a
+capacity gap, where the ladder wanted to climb but had nowhere left to go — see rule 4 in §5.
 
 ## 5. Escalation policy
 
@@ -362,7 +428,8 @@ class EscalationDecision(BaseModel):
 ```
 
 Hard limits are evaluated first and short-circuit. The quality rules are then all
-evaluated together, accumulating reasons. Availability is checked **last**.
+evaluated together, accumulating reasons. Availability is checked **last**, deliberately —
+see the note below the table.
 
 | # | Condition | Outcome |
 | --- | --- | --- |
@@ -377,27 +444,33 @@ evaluated together, accumulating reasons. Availability is checked **last**.
 | 10 | Disagreement with a prior tier's label | escalate (`tier_disagreement`) |
 | 11 | Language unsupported by the deciding tier | escalate (`unsupported_language`) |
 | — | no reason to climb | **stop** (`confident`) |
-| 4 | wanted to climb, but next tier is down / breaker open | **stop** (`next_tier_unavailable`) |
+| 4 | wanted to climb, but nothing further up the ladder can serve | **stop** (`next_tier_unavailable`) |
 
-> **Why rule 4 moved to the end.** It was originally specified fourth, which made it
-> short-circuit before the quality rules ran. The outcome was correct — the ladder stops
-> either way — but the *reported reason* was not: a rung that answered confidently at 0.92
-> with no cloud provider configured reported `next_tier_unavailable`, telling an operator
-> they were blocked by an outage when the ladder had simply finished. Since rules 5–11 are
-> pure computation, evaluating them first costs nothing and makes `next_tier_unavailable`
-> mean what it says: *we wanted to climb and could not*. Explainability is a stated
-> first-class output of this service, so a trace reason that misleads is a real defect, not
-> a cosmetic one. Rule numbers are kept as originally assigned so the reason codes and their
-> tests stay traceable to this table.
+Rule 4 runs last on purpose: the quality rules (5–11) are pure computation and cost nothing
+to evaluate, so checking them first is what lets `next_tier_unavailable` mean what it says —
+*we wanted to climb and could not* — rather than firing ahead of a confident verdict and
+misreporting a finished ladder as a blocked one. Rule numbers are kept as originally assigned
+so the reason codes and their tests stay traceable to this table.
+
+Stopping on rule 4 also marks the response `degraded: true` and logs a distinct
+`ladder.capacity_gap` warning (§4) — the caller got the best available verdict, but a
+dependency being down, not the verdict's own quality, is why the ladder stopped there.
+
+The **lookahead behind rule 4 spans the whole remaining ladder**, not just the adjacent rung:
+a rung that is down does not mask a healthy one further up (§4's orchestrator sketch,
+`_next_available_position`). One dead rung is a hop now, not a ceiling.
 
 ### Default thresholds (all configurable, no code change to tune)
 
-| Tier | Confidence floor | Margin floor |
-| --- | --- | --- |
-| T0 rules | 0.95 | — |
-| T1 classifier | 0.80 | 0.25 |
-| T2 local LLM | 0.72 | 0.20 |
-| T3 cloud (Haiku) | 0.65 → arbitrate to Sonnet 5 | 0.15 |
+| Tier | Confidence floor | Margin floor | Timeout |
+| --- | --- | --- | --- |
+| T0 rules | 0.95 | — | 5 ms |
+| T1 classifier | 0.80 | 0.25 | 400 ms |
+| T2 local LLM | 0.72 | 0.20 | 6000 ms |
+| T3 cloud (default model) | 0.65 → arbitrate to the stronger model | 0.15 | 8000 ms |
+
+T1's timeout reflects the zero-shot backend's real cost (§6), not a distilled head's — see
+§12 changelog for the measurement behind the 400 ms figure specifically.
 
 ### Complexity triggers (`pipeline/features.py`)
 
@@ -424,79 +497,121 @@ accuracy, so they are tuned toward escalation.
 
 ### T0 — Rules
 
-Ordered short-circuits, each returning immediately on match:
-cache hit → empty/whitespace/punctuation-only → explicit `rating` in a review request that
-is unambiguous (≤20% or ≥80% of scale) *and* prose is short → emoji-only text → pure
-lexicon match with no negation and no contrastive marker and `token_count <= 5` → blocklist.
-No match yields `Label.UNKNOWN` with confidence `0.0`, which always escalates.
+Ordered short-circuits, each returning immediately on match: cache hit → empty/whitespace/
+punctuation-only → an explicit `rating` on the request that is unambiguous (≤20% or ≥80% of
+scale) *and* whose prose is short → emoji-only text → pure lexicon match with no negation and
+no contrastive marker and `token_count <= 5` → blocklist. No match yields `Label.UNKNOWN` with
+confidence `0.0`, which always escalates.
 
 ### T1 — Classifier
 
-Ensemble of a quantised ONNX sentiment model (INT8, CPU, batched) and a lexicon score.
-Softmax probabilities give both `confidence` (top-1) and `label_margin` (top-1 − top-2).
-Runs in a thread-pool executor so the event loop is never blocked. Calibrated with
-temperature scaling against a held-out set so that a reported 0.8 means roughly 80% accuracy
-— without this, the whole policy is built on sand.
+The default backend is `ZeroShotOnnxScorer`: a quantised DeBERTa-v3 **entailment** head
+(`MoritzLaurer/deberta-v3-base-zeroshot-v1`), not a head trained against one fixed label set.
+It scores each of the four labels by templating a hypothesis — *"This text expresses a
+positive sentiment."* — and checking whether the input entails it, batched as one inference
+call, then softmaxes the entailment logit across the four labels. This is the same procedure
+behind HF's `zero-shot-classification` pipeline in single-label mode, and it earns a concrete
+win over a fixed-label alternative: it can score `MIXED` directly, where a two- or three-class
+head never could and needed the lexicon blend to manufacture that mass instead.
 
-### T2 — Local LLM (Ollama)
+`OnnxScorer` — a plain sequence-classification head, the SST-2 family — is still supported
+behind `classifier.scorer_kind: sequence_classification` for a deployment that already baked
+that artifact in. The two are not interchangeable at the same artifact file, so the setting is
+explicit rather than autodetected from the model's output shape.
 
-Prompt = system rubric + resource-specific instructions + few-shot + the input. Requests the
-JSON schema derived from `LLMSentimentOutput`, with `format` constrained so the model cannot
-emit prose. `temperature: 0`, deterministic seed. One retry on schema-validation failure with
-a repair instruction appended; a second failure marks the tier failed and escalates.
+Both blend with a lexicon score for an ensemble read. Softmax probabilities give both
+`confidence` (top-1) and `label_margin` (top-1 − top-2). Scoring runs in a thread-pool
+executor so the event loop is never blocked. **Calibration matters regardless of backend**:
+`classifier.calibration_temperature` defaults to `1.0` (uncalibrated), and every threshold in
+the table above is a claim about probability that an uncalibrated model does not actually
+make true.
 
-### T3 — Cloud LLM
+INT8 quantization of the zero-shot checkpoint is not a drop-in step — naive per-tensor
+dynamic quantization measurably destroys its ability to discriminate between hypotheses.
+`scripts/export_zeroshot_model.py` is pinned to a corrected configuration
+(`per_channel=True`); see the §12 changelog for the measurement.
+
+### T2 — Local LLM (via air-llm)
+
+Prompt = a compact system prefix (not the cloud tier's — see below) + one task framing +
+the caller's optional fields + the input. Requests the JSON schema derived from
+`LLMSentimentOutput`, with `format` constrained so the model cannot emit prose.
+`temperature: 0`, deterministic seed. One retry on schema-validation failure with a repair
+instruction appended; a second failure marks the tier failed and escalates.
+
+The call itself is one `AirLlmProvider.classify()`, targeting `air_llm.local_model` — an
+air-llm routing alias owned by this service (`classify-local`, by default), but deliberately
+a single-entry one with no failover of its own, so a down local daemon fails this one call
+cleanly and the ladder escalates to Tier 3, rather than air-llm quietly substituting a
+cloud model under the Tier-2 label. The verdict reports `f"{result.provider.value}:
+{result.model}"` — the resolved backend, not the alias name — the same shape Tier 3 uses,
+so a caller can always see who actually answered regardless of which rung decided.
+
+### T3 — Cloud LLM (via air-llm)
 
 ```python
 async def analyse(self, ctx: TierContext) -> TierVerdict:
-    provider, model = self.registry.select(ctx)          # preference order + breaker state
-    result = await provider.classify(
-        system_prompt=self.prompts.system_for(ctx.resource),   # cache-anchored prefix
-        user_content=self.prompts.user_for(ctx),
-        output_model=LLMSentimentOutput,
-        model=model,                                     # claude-haiku-4-5 by default
-        max_tokens=1024,
-        cache_prefix=True,
+    primary = await self._call(
+        ctx, model=self._config.cloud_model,           # "classify-default" alias, by default
+        max_tokens=self._config.max_tokens,
+        user_text=user_content(ctx),
     )
-    if result.parsed.confidence < self.arbitration_floor and self.arbitration_enabled:
-        result = await provider.classify(..., model="claude-sonnet-5", max_tokens=2048)
-    return TierVerdict.from_llm(self.tier, result)
+    output = _output_of(primary)
+    final, usage = await self._arbitrate(ctx, primary=primary, output=output)
+    return output.to_verdict(
+        self.tier, model_version=f"{final.provider.value}:{final.model}",
+        latency_ms=..., usage=usage,
+    )
+
+async def _arbitrate(self, ctx, *, primary, output):
+    if output.confidence >= self._config.arbitration_floor or not self._config.arbitration_enabled:
+        return primary, primary.to_usage()
+    arbiter = await self._call(ctx, model=self._config.arbiter_model,     # "classify-arbiter" alias
+                                max_tokens=self._config.arbiter_max_tokens,
+                                user_text=user_content(ctx))               # hinted with primary's verdict
+    return arbiter, primary.to_usage() + arbiter.to_usage()
 ```
 
-#### Anthropic adapter notes
+`self._call` wraps one `AirLlmProvider.classify()` behind this rung's own timeout, circuit
+breaker and bulkhead — the guards that decide *whether to attempt* the call at all. Which
+provider actually answers is air-llm's decision, made per request by walking the named
+alias's failover chain; this tier never sees or chooses between the cloud vendors directly.
+`final.provider`/`final.model` in the verdict above are read from air-llm's own response, so
+the trace reports who actually answered even when a chain failed over mid-request.
 
-- Uses the SDK's structured-output parse path with `LLMSentimentOutput` as the output model,
-  so a validated instance comes back rather than a string to parse.
-- **Prompt caching** marks the end of the system prompt + rubric + few-shot block as the
-  cacheable prefix. This only takes effect above the model's minimum cacheable prefix —
-  **4096 tokens for Haiku 4.5, 1024 for Sonnet 5** — so the prompt bundle is sized past the
-  Haiku threshold deliberately, and `cache_read_tokens` is asserted non-zero in an
-  integration test. Below the threshold nothing errors; the cache just silently never fills.
+#### air-llm adapter notes
+
+- `AirLlmProvider.classify()` POSTs one `InferenceRequest` (`task: "chat"`) to air-llm's
+  `/v1/inference`, with the caller's JSON Schema riding along as `json_schema` — air-llm binds
+  it to whichever structured-output mechanism the answering provider uses internally, so this
+  service never parses prose or retries a schema failure at the HTTP layer. Which mechanism
+  that is for a given vendor is air-llm's own concern, not this service's.
+- **Prompt caching** marks the end of the system prompt as the cacheable prefix. This only
+  takes effect above the model's minimum cacheable prefix, which is provider- and
+  model-specific and re-measured in `providers/prompts/loader.py`'s own docstring rather than
+  duplicated here (`tests/unit/test_prompts.py` asserts it). Below the threshold nothing
+  errors; the cache just silently never fills. This is still this service's own prompt to size
+  correctly — air-llm forwards `cache_prefix` but has no opinion on how big the prefix should be.
 - The prefix must be **byte-stable**: no timestamps, no request IDs, no per-caller
-  interpolation above the cache breakpoint. Volatile content goes in the user turn only.
-- Classification wants no extended thinking. Haiku 4.5 has no `effort` parameter; Sonnet 5
-  supports `effort` and defaults to adaptive thinking, so the arbitration call sets
-  thinking off (or `effort: low`) explicitly rather than paying for reasoning tokens on a
-  labelling task.
-- Sonnet 5 rejects non-default sampling parameters, so determinism is steered by prompt and
-  schema, not by `temperature`.
-- Non-2xx handling uses the SDK's typed exception classes in a most-specific-first chain
-  (not-found → rate-limit → status → connection), so retryable and non-retryable failures
-  are distinguished rather than collapsed into one `except`.
+  interpolation above the cache breakpoint. Volatile content — the text, the caller's
+  optional fields, what cheaper tiers already concluded — goes in the user turn only.
+- `AirLlmProvider.classify()` reads the response's own `provider` field for
+  `ProviderResult.provider`, not the adapter's own constructed-with label — cost and usage
+  attribution has to follow who actually answered, which can differ from the label whenever
+  an alias's failover chain moved to a different vendor mid-request.
+- Non-2xx handling maps air-llm's own status codes (429 → retryable rate limit, 5xx →
+  unavailable) rather than any one vendor's SDK exceptions — air-llm has already absorbed
+  that per-vendor distinction.
 
-#### Provider registry
-
-```python
-class ProviderRegistry:
-    async def select(self, ctx) -> tuple[LLMProvider, str]:
-        for candidate in self._preference_order(ctx):   # config-driven, per-key overridable
-            if self._breaker[candidate.name].is_closed and await candidate.health():
-                return candidate, self._model_for(candidate, ctx)
-        raise NoProviderAvailableError()
-```
-
-Failover is *provider-level*, not call-level: once a breaker opens, traffic moves wholesale
-until the half-open probe succeeds, rather than every request paying a failed attempt first.
+**The remote and local system prompts are different files, not one shared string.** The
+remote one is deliberately long to clear the cache floor above — a cached prefix bills at
+roughly a tenth of the input rate from the second call onward. That argument is worth nothing
+locally: whichever runtime serves Tier 2 today has no cross-request cache, so every token of a
+long prefix is re-processed on every call. The local prompt
+(`providers/prompts/system_compact.md`) keeps the label taxonomy and the
+confidence-calibration rubric — the policy gates on the confidence T2 reports — and drops the
+long-form discussion. Both share the same task framing and output schema in the *user* turn
+(`providers/prompts/loader.py`).
 
 ## 7. Configuration
 
@@ -507,19 +622,21 @@ until the half-open probe succeeds, rather than every request paying a failed at
 | `APP__ENV` | `development` | Environment name |
 | `APP__WORKERS` | `2` | Uvicorn workers |
 | `APP__MAX_BODY_BYTES` | `1048576` | Ingress body cap |
-| `TIERS__ENABLED` | `t0,t1,t2,t3` | Which rungs exist at all |
-| `TIERS__T1__CONFIDENCE_FLOOR` | `0.80` | Escalation threshold |
-| `TIERS__T1__MARGIN_FLOOR` | `0.25` | Top-2 margin threshold |
-| `TIERS__T2__CONFIDENCE_FLOOR` | `0.72` | — |
-| `TIERS__T3__ARBITRATION_FLOOR` | `0.65` | Haiku→Sonnet arbitration trigger |
-| `TIERS__*__TIMEOUT_MS` | `5 / 200 / 6000 / 8000` | Per-tier timeout (T2 measured, see below) |
-| `PROVIDERS__PREFERENCE` | `anthropic,openai` | Cloud failover order |
-| `PROVIDERS__ANTHROPIC__MODEL` | `claude-haiku-4-5` | Default cloud model |
-| `PROVIDERS__ANTHROPIC__ARBITER_MODEL` | `claude-sonnet-5` | Arbitration model |
-| `PROVIDERS__ANTHROPIC__API_KEY` | — | Secret, injected |
-| `PROVIDERS__OLLAMA__BASE_URL` | `http://localhost:11434` | Local LLM |
-| `PROVIDERS__OLLAMA__MODEL` | `llama3.2:3b` | Local model tag |
-| `PROVIDERS__OLLAMA__NUM_CTX` | `8192` | Local context window; must hold compact prompt + longest input |
+| `APP__MAX_BATCH_ITEMS` | `100` | Effective batch ceiling (schema allows up to 1000) |
+| `CLASSIFIER__SCORER_KIND` | `zero_shot_nli` | `zero_shot_nli` \| `sequence_classification` — which Tier-1 backend `MODEL_PATH` is |
+| `CLASSIFIER__CALIBRATION_TEMPERATURE` | `1.0` | Temperature scaling; `1.0` = uncalibrated |
+| `TIERS__T0_RULES__TIMEOUT_MS` | `5` | — |
+| `TIERS__T1_CLASSIFIER__CONFIDENCE_FLOOR` | `0.80` | Escalation threshold |
+| `TIERS__T1_CLASSIFIER__MARGIN_FLOOR` | `0.25` | Top-2 margin threshold |
+| `TIERS__T1_CLASSIFIER__TIMEOUT_MS` | `400` | Sized for the zero-shot backend — §6 and the §12 changelog |
+| `TIERS__T2_LOCAL_LLM__CONFIDENCE_FLOOR` | `0.72` | — |
+| `AIR_LLM__ENABLED` | `true` | Switches Tiers 2 and 3 off together when false — a local-only deployment is a supported shape |
+| `AIR_LLM__BASE_URL` | `http://localhost:8083` | air-llm's address |
+| `AIR_LLM__TOKEN` | — | Secret, injected; air-llm's service token for this caller |
+| `AIR_LLM__LOCAL_MODEL` | `classify-local` | Tier 2 — an air-llm alias, deliberately single-entry with no failover (§6's T2 note) |
+| `AIR_LLM__CLOUD_MODEL` | `classify-default` | Tier 3 — an air-llm routing alias with its own cross-vendor failover |
+| `AIR_LLM__ARBITER_MODEL` | `classify-arbiter` | Tier 3 arbitration trigger's target alias |
+| `AIR_LLM__ARBITRATION_FLOOR` | `0.65` | Confidence below which the arbiter alias is called |
 | `CACHE__BACKEND` | `memory` | `memory` \| `redis` |
 | `CACHE__TTL_SECONDS` | `3600` | Verdict cache TTL |
 | `RESILIENCE__BREAKER_THRESHOLD` | `5` | Consecutive failures to open |
@@ -558,7 +675,7 @@ One access log per request, plus one structured event per tier decision:
 ```json
 {"event":"tier.decision","request_id":"req_01J...","trace_id":"4bf9...",
  "tier":"t1_classifier","label":"positive","confidence":0.52,"margin":0.11,
- "latency_ms":11.2,"escalate":true,"reasons":["low_confidence","contrastive_conjunction"],
+ "latency_ms":95.2,"escalate":true,"reasons":["low_confidence","contrastive_conjunction"],
  "text_sha256":"9f2b…","text_len":58}
 ```
 
@@ -576,7 +693,7 @@ Root span per request; child spans `preprocess`, `tier.{name}`, `provider.{name}
   "title": "Request validation failed",
   "status": 422,
   "detail": "text: String should have at least 1 character",
-  "instance": "/v1/sentiment",
+  "instance": "/v1/classify",
   "request_id": "req_01J...",
   "errors": [ { "field": "text", "code": "too_short" } ] }
 ```
@@ -600,74 +717,112 @@ outage produces a `200` with `degraded: true` and a lower-tier verdict.
 
 | Layer | Coverage |
 | --- | --- |
-| **Unit** | Policy truth table (each rule in §5 fires exactly when it should); feature extraction; PII redaction; lexicon scoring; cost arithmetic; breaker state machine |
-| **Tier fakes** | Orchestrator driven by four scripted fake tiers — verifies ordering, `min_tier`/`max_tier`, budget and cost stops, failure→degrade, and best-verdict selection with **no network at all** |
-| **Contract** | Golden request/response fixtures per endpoint; OpenAPI snapshot diffed in CI so a schema change cannot land silently |
-| **Provider** | Recorded-cassette tests for Anthropic/OpenAI/Ollama adapters; a live smoke test gated behind a marker |
-| **Integration** | Full stack via testcontainers (Redis + Ollama); asserts trace completeness, metric emission, and non-zero `cache_read_tokens` on the second identical cloud call |
-| **Load** | Locust profile at target RPS; asserts P95 and tier distribution stay inside the §7 plan targets |
+| **Unit** | Policy truth table (each rule in §5 fires exactly when it should); feature extraction; PII redaction; lexicon scoring; breaker state machine; the derivation heuristics (`_derive_urgency`, `_derive_routing`, ...) |
+| **Tier fakes** | Orchestrator driven by scripted fake tiers — verifies ordering, `min_tier`/`max_tier`, budget and cost stops, failure→degrade, best-verdict selection, and the multi-hop lookahead, with **no network at all** |
+| **Contract** | Golden request/response fixtures; OpenAPI snapshot diffed in CI so a schema change cannot land silently |
+| **Provider** | Scripted-stub tests for `AirLlmProvider` against air-llm's `/v1/inference` contract (health, classify, error mapping) — no network, no real air-llm |
+| **Integration** | Full stack (Redis + a reachable air-llm); asserts trace completeness, metric emission, and non-zero `cache_read_tokens` on the second identical cloud call |
 | **Accuracy** | Labelled evaluation set; per-tier confusion matrices; ladder-vs-cloud-only agreement; regression gate on merge |
 
 ## 11. Implementation order
 
-Matching the plan's phases, the concrete build order is:
+Matching the plan's phases, the concrete build order was:
 
 1. `config.py` → `main.py` → `api/errors.py` → `observability/logging.py` → health endpoints
-2. `schemas/*` complete → routers with stub verdicts → OpenAPI review → auth + idempotency
+2. `schemas/*` complete → the route with a stub verdict → OpenAPI review → auth + idempotency
 3. `preprocess/*` → `pipeline/features.py` → `tiers/t0` → `tiers/t1` → `policy` →
    `orchestrator` (+ the fake-tier suite, which should exist *before* real tiers do)
 4. `providers/base` + `ollama_provider` → `tiers/t2` → `resilience/*`
 5. `providers/anthropic_provider` → `openai_provider` → `registry` → `tiers/t3` →
    `observability/cost`
 6. `security/quotas` → metrics + tracing → batch concurrency → load test → Docker/compose
-   finalisation → `docs/api.md` + runbook
+   finalisation
 
-Writing the fake-tier orchestrator suite in step 3, before any real tier exists, is
+Writing the fake-tier orchestrator suite in step 3, before any real tier exists, was
 deliberate: it pins the ladder's semantics while they are still cheap to change.
 
 ---
 
-## 12. Amendments from implementation
+## 12. Changelog
 
-The LLD is the implementation contract, so where building the service proved it wrong, it is
-amended here rather than silently diverged from.
+Corrections to this document worth leaving a trace of, newest first. Each entry says what
+changed and why; the *current* behaviour is described in the sections above, not here.
 
-### 12.1 The prompt library is split, not shared
+- **`/v1/capabilities` requires `X-API-Key` and is rate-limited, same as `/v1/classify`.**
+  Flagged in peer review: it was the only `/v1` route besides `/v1/health`/`/v1/ready` with
+  neither, despite disclosing configured model/alias names and which Tier-1 backend actually
+  loaded — real deployment detail, not the liveness boolean a kubelet or load balancer needs
+  to probe without credentials (§4, §7's Security note). `/v1/health` and `/v1/ready` stay
+  exempt on purpose; `/v1/capabilities` no longer does.
 
-§6 said Tiers 2 and 3 share their prompt entirely. They share the *builder* and the *output
-schema*, but not the system prefix.
+- **`CloudLLMTier` self-builds a bulkhead when none is passed, exactly as `LocalLLMTier`
+  already did.** Also flagged in peer review: the air-llm cutover's constructor rewrite (§6)
+  gave both tiers the same `bulkhead: Bulkhead | None = None` shape, but nothing had
+  actually verified `main.py`'s production call — `CloudLLMTier(settings, cloud)`, no
+  bulkhead argument — exercised the self-built default rather than silently running
+  unprotected (`guard.py`'s `guarded()` skips bulkhead protection outright when handed
+  `None`, rather than raising). It does; a regression test now pins it at both the
+  constructor level and through `build_ladder()` itself, since the bug this guards against
+  lives in the wiring, not only in the tier class.
 
-The remote prefix is deliberately ~8,800 tokens to clear Anthropic's per-model prompt-cache
-floor (4096 on Haiku 4.5), because from the second request onward a cached prefix bills at
-roughly a tenth of the input rate. **That argument is worth nothing on a locally served
-model:** Ollama has no cross-request prefix cache, so every one of those tokens is
-re-processed on every call.
+- **`air_llm.max_tokens`/`arbiter_max_tokens` default to 2048/4096, not 1024/2048.**
+  Collapsing three provider-specific token ceilings into one shared setting (the air-llm
+  cutover below) initially kept Anthropic's old default, 1024 — generous for Anthropic, but
+  both `classify-default` and `smart` carry a Gemini fallback rung, and Gemini's 2.5 family
+  bills thinking tokens as output. Verified live: this service's ~8.8k-token system prompt
+  left Gemini so little of a 1024 budget after reasoning that it never reached the closing
+  brace, which surfaced as a schema-validation failure and looked like a parsing bug rather
+  than what it was — the same trap §6's Anthropic-adapter-notes-turned-air-llm-adapter-notes
+  already named for Gemini specifically, rediscovered the moment a shared ceiling made it
+  live traffic's problem instead of one vendor's configuration detail.
 
-Measured on `llama3.2:3b`, the full prefix took **~9.9 s** against **~1.5 s** for a compact
-one — and because it was also 2.2× the configured `num_ctx`, Ollama was *silently truncating
-it*. The tier paid the latency, lost the rubric, and blew its timeout on every request, with
-nothing logged and nothing raised. The ladder degraded to Tier 1 exactly as designed, which
-is precisely why this could have shipped unnoticed.
+- **Every model call — Tier 2 and Tier 3 both — routes through air-llm, not a provider SDK
+  or air-infra's gateway.** `providers/anthropic_provider.py`, `openai_provider.py`,
+  `gemini_provider.py`, `ollama_provider.py`, `infra_provider.py`, and `providers/registry.py`
+  (`ProviderRegistry`, cross-vendor failover, per-provider health caching) are gone,
+  replaced by one `AirLlmProvider` (§6) that speaks air-llm's `POST /v1/inference`. air-llm
+  is a separate, independently-deployed platform service — the model-hosting half of what
+  used to be air-infra's `gateway/` module, extracted into its own repo because air-infra
+  itself is being scoped down to local-development convenience only and will never run in
+  production. What this service keeps is exactly what it should: the escalation decision
+  (confidence floors, arbitration) and the prompt/schema construction — "is this answer good
+  enough" stays here; "where and how to execute the call" is entirely air-llm's now. One
+  side effect worth naming: Tier 3's `model_version` no longer advertises "the first
+  configured provider in preference order" (that concept is gone, along with the
+  multi-provider `ProvidersSettings` block) — it is simply the configured `cloud_model`,
+  which may itself be an air-llm routing alias rather than a bare model id.
 
-So `prompts/system_compact.md` (~1,100 tokens) serves the local rung. It keeps the label
-taxonomy, the polarity anchors, and — critically — the confidence-calibration rubric, because
-the escalation policy gates on the confidence Tier 2 reports. It drops the long-form
-discussion and most worked examples. `tests/unit/test_prompts.py` guards both the remote
-prompt's cache floor and the compact prompt's fit inside `num_ctx`; both failures are
-invisible at runtime, so a test is the only thing that catches them.
+- **One route, not three.** `/v1/sentiment`, `/v1/feedback` and `/v1/reviews` are removed.
+  `/v1/classify` (§3, §6's tier notes) absorbed every field any of the three produced —
+  `aspects`/`rating_consistency` from reviews, `actionability` from feedback — behind one
+  request and one response shape. `ResourceKind` and the per-resource dispatch it drove
+  (prompt framing, response shaping, a `REVIEWS`-only gate on the T0 rating shortcut) are
+  gone with it: there is one path now, not a choice between four.
 
-### 12.2 Tier-2 timeout and the request latency budget
+- **Tier 1's default backend is a zero-shot NLI head, not a fixed classifier.** No
+  general-purpose, non-domain-locked sequence-classification checkpoint exists for the
+  architecture this deployment wants (DeBERTa-v3-base), so the default became an entailment
+  head scored per-label against a templated hypothesis (§6) — which, as a side effect, can
+  express `MIXED` directly instead of relying on the lexicon blend for it. Two corrections
+  came with it: **naive INT8 quantization silently destroys this checkpoint's ability to
+  discriminate** (`per_channel=True` fixes it — `scripts/export_zeroshot_model.py` is pinned
+  to that configuration), and **Tier 1's timeout rose from 200ms to 400ms** — four batched
+  forward passes on a 184M-parameter encoder measured p90 193ms / max 199ms inside the built
+  container, already losing samples to the old ceiling.
 
-§5 guessed 4000 ms for Tier 2. Measured warm on `llama3.2:3b`/CPU with the compact prompt:
-**p50 1.5 s, p90 3.3 s**. A 4 s ceiling left no headroom over p90 and lost every cold model
-load outright, so the default is now **6000 ms**.
+- **The orchestrator's lookahead spans the whole remaining ladder**, not just the adjacent
+  rung (§4, §5). A dead rung used to cap every request below it even when a healthy rung sat
+  further up, because the policy's "can I climb" check only ever looked one hop ahead.
 
-The more important correction is conceptual: the per-tier timeout is rarely the binding
-constraint. The orchestrator gives each rung `min(tier timeout, remaining request budget)`,
-so `options.latency_budget_ms` is the real governor. Its default rose from 5000 ms to
-**8000 ms** so that a request can actually reach the cloud tier on the default path.
+- **Rule 4 (§5) evaluates last.** Originally fourth, which made `next_tier_unavailable` fire
+  ahead of the quality rules and misreport a confidently-finished ladder as a blocked one.
 
-### 12.3 Rule 4 evaluates last
+- **Tier-2's timeout is 6000ms, not the original 4000ms guess** — measured warm on
+  `llama3.2:3b`/CPU: p50 1.5s, p90 3.3s. `options.latency_budget_ms` rose from 5000ms to
+  8000ms alongside it, since it is the binding constraint far more often than any single
+  tier's own timeout.
 
-See the note under §5. `next_tier_unavailable` now reports only when the policy genuinely
-wanted to climb.
+- **Tier 2 and Tier 3 do not share one system prompt.** The remote prefix is sized to clear
+  Anthropic's prompt-cache floor; that argument does not transfer to a model with no
+  cross-request cache, and feeding Ollama the long prefix cost ~9.9s (against ~1.5s for a
+  compact one written for it) while silently exceeding `num_ctx` and truncating itself.

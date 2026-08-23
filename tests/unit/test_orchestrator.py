@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from air_classifier.config import AppSettings, Settings, TiersSettings
-from air_classifier.constants import Label, ResourceKind, Tier
+from air_classifier.constants import Label, Tier
 from air_classifier.observability import metrics
 from air_classifier.pipeline import orchestrator as orchestrator_module
 from air_classifier.pipeline.orchestrator import NoVerdictError, Orchestrator
@@ -66,6 +66,9 @@ class FakeTier:
         if self.probe_raises:
             raise RuntimeError("probe exploded")
         return self.available
+
+    async def unavailable_reason(self) -> str | None:
+        return None if self.available else "scripted unavailable"
 
     async def analyse(self, ctx: TierContext) -> TierVerdict:
         self.seen.append(ctx)
@@ -131,7 +134,6 @@ def tuned_settings(*, timeout_ms: int = 1000) -> Settings:
 def make_ctx(*, options: Options | None = None, budget_ms: float = 5000.0) -> TierContext:
     return TierContext(
         request_id="req_fake",
-        resource=ResourceKind.SENTIMENT,
         text="the battery lasts all day",
         original_length=25,
         language=LanguageInfo(code="en", confidence=0.99),
@@ -364,6 +366,15 @@ async def test_an_abstaining_ladder_yields_no_verdict() -> None:
 
 
 async def test_an_unavailable_next_rung_stops_the_ladder_early() -> None:
+    """Stopping here is not the same as stopping confidently.
+
+    T0's own verdict is `unsure` — it wanted to climb — and the only thing
+    that stopped it was T1 reporting unavailable. That is a capability gap,
+    not a clean finish: `degraded` must say so, and unlike every other stop
+    reason the trace does not fold it into `null`, because a caller (or
+    DevOps, reading the same field) needs to be able to tell "confident" and
+    "stuck below where the ladder wanted to be" apart.
+    """
     t0 = FakeTier(tier=Tier.T0_RULES, verdict=unsure(Tier.T0_RULES))
     t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=verdict(Tier.T1_CLASSIFIER), available=False)
 
@@ -371,7 +382,8 @@ async def test_an_unavailable_next_rung_stops_the_ladder_early() -> None:
 
     assert t1.calls == 0
     assert result.best.tier is Tier.T0_RULES
-    assert result.steps[-1].escalated_because is None
+    assert result.steps[-1].escalated_because == "next_tier_unavailable"
+    assert result.degraded is True
 
 
 async def test_a_probe_that_raises_counts_as_unavailable() -> None:

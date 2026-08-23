@@ -219,3 +219,10 @@ __marimo__/
 
 # Background server logs from `make start`.
 .run/
+
+# Tier-1 ONNX artifact — produced by scripts/export_zeroshot_model.py and bind-mounted
+# into the container (docker-compose.yml); not committed, not baked into the image.
+/models/
+
+# macOS Finder metadata.
+.DS_Store

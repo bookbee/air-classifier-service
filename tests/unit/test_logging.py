@@ -247,9 +247,19 @@ def test_production_settings_reject_raw_text_logging() -> None:
 # ── Tracing degradation ───────────────────────────────────────────────────────
 
 
-def test_otel_is_absent_in_this_environment() -> None:
-    """The rest of the tracing tests only mean something if otel really is missing."""
-    assert obs_tracing.OTEL_AVAILABLE is False
+@pytest.fixture
+def without_otel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the no-otel path regardless of whether the extra is installed.
+
+    These tests cover the *degraded* configuration — a deployment built without
+    `air-classifier[otel]`. They used to assert the extra was genuinely absent,
+    which made them pass or fail on how the venv happened to be built: `make
+    install` installs `.[all]`, so on a stock checkout they failed against the
+    very environment the Makefile creates. Simulating absence keeps the coverage
+    and makes it independent of the install profile.
+    """
+    monkeypatch.setattr(obs_tracing, "OTEL_AVAILABLE", False)
+    monkeypatch.setattr(obs_tracing, "_tracer", None)
 
 
 def test_configure_tracing_is_a_noop_when_disabled() -> None:
@@ -261,6 +271,7 @@ def test_configure_tracing_is_a_noop_when_disabled() -> None:
 
 def test_configure_tracing_warns_but_survives_without_otel(
     capsys: pytest.CaptureFixture[str],
+    without_otel: None,
 ) -> None:
     configure_logging(make_settings())
     obs_tracing.configure_tracing(
@@ -273,7 +284,7 @@ def test_configure_tracing_warns_but_survives_without_otel(
     assert obs_tracing.tracing_enabled() is False
 
 
-async def test_span_yields_a_usable_noop() -> None:
+async def test_span_yields_a_usable_noop(without_otel: None) -> None:
     async with obs_tracing.span("tier.t1_classifier", tier="t1_classifier", cost=None) as active:
         active.set_attribute("label", "positive")
         active.add_event("escalated")
@@ -287,13 +298,13 @@ async def test_span_does_not_swallow_exceptions() -> None:
             raise RuntimeError("tier failed")
 
 
-async def test_nested_spans_are_independent() -> None:
+async def test_nested_spans_are_independent(without_otel: None) -> None:
     async with obs_tracing.span("request") as outer, obs_tracing.span("preprocess") as inner:
         assert outer.is_recording() is False
         assert inner.is_recording() is False
         assert obs_tracing.current_trace_id() is None
 
 
-def test_instrument_app_is_a_noop_without_otel() -> None:
+def test_instrument_app_is_a_noop_without_otel(without_otel: None) -> None:
     sentinel = object()
     obs_tracing.instrument_app(sentinel)  # must not raise

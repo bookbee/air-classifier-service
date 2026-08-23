@@ -33,10 +33,9 @@ import pytest
 from fastapi import FastAPI
 
 from air_classifier.config import (
+    AirLlmSettings,
     AppSettings,
     CacheSettings,
-    OllamaSettings,
-    ProvidersSettings,
     Settings,
 )
 from air_classifier.main import create_app
@@ -50,25 +49,17 @@ SPEC_PATH: Final[Path] = Path(__file__).resolve().parents[2] / "docs" / "openapi
 #: on a separate port, and declaring it here would describe it wrongly to every
 #: generated client.
 EXPECTED_PATHS: Final[dict[str, set[str]]] = {
-    "/v1/sentiment": {"post"},
-    "/v1/sentiment/batch": {"post"},
-    "/v1/feedback": {"post"},
-    "/v1/feedback/batch": {"post"},
-    "/v1/reviews": {"post"},
-    "/v1/reviews/batch": {"post"},
+    "/v1/classify": {"post"},
+    "/v1/classify/batch": {"post"},
     "/v1/health": {"get"},
     "/v1/ready": {"get"},
     "/v1/capabilities": {"get"},
 }
 
-#: The six that run the ladder, and therefore carry the full error catalogue.
+#: The two that run the ladder, and therefore carry the full error catalogue.
 ANALYSIS_PATHS: Final[tuple[str, ...]] = (
-    "/v1/sentiment",
-    "/v1/sentiment/batch",
-    "/v1/feedback",
-    "/v1/feedback/batch",
-    "/v1/reviews",
-    "/v1/reviews/batch",
+    "/v1/classify",
+    "/v1/classify/batch",
 )
 
 #: docs/02-lld.md §9. Every one of these is reachable on an analysis route, so
@@ -82,14 +73,14 @@ EXPECTED_ERROR_STATUSES: Final[frozenset[str]] = frozenset(
 def app() -> FastAPI:
     """The real application, assembled but never started.
 
-    Ollama off and no cloud credentials, so nothing in this module can be
-    tempted to open a connection. Neither choice reaches the document: the
-    routes are declared the same way whatever the ladder turns out to be.
+    air-llm off, so nothing in this module can be tempted to open a
+    connection. That choice does not reach the document: the routes are
+    declared the same way whatever the ladder turns out to be.
     """
     return create_app(
         Settings(
             app=AppSettings(env="test"),
-            providers=ProvidersSettings(ollama=OllamaSettings(enabled=False)),
+            air_llm=AirLlmSettings(enabled=False),
             cache=CacheSettings(backend="memory"),
         )
     )

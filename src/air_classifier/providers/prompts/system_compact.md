@@ -48,6 +48,16 @@ When the text evaluates distinct facets, return one entry per facet: a lowercase
 
 At most five, strongest first, each scored 0.0–1.0. Use only: joy, satisfaction, excitement, gratitude, relief, trust, anger, frustration, disappointment, sadness, fear, anxiety, disgust, confusion, surprise, indifference.
 
+## tone, topics, intent — only for /classify requests
+
+The task framing below tells you if this request wants these filled. If not, leave `tone`/`intent` unset and `topics` empty — do not guess.
+
+**tone** (one label + confidence): `neutral`, `satisfied`, `frustrated`, `angry`, `disappointed`, `confused`, `anxious`, `sarcastic`, `appreciative`, `urgent`. Register, not polarity — "fix this" is `frustrated`, "I'm heartbroken this broke" is `disappointed`, both negative.
+
+**topics** (zero or more, each label + confidence): `delivery`, `payment`, `product_quality`, `return`, `refund`, `pricing`. Only topics the text is substantively about, not a passing word.
+
+**intent** (one label + confidence): `complaint`, `information`, `refund_request`, `return_request`, `order_tracking`, `replacement_request`, `cancellation`, `recommendation`, `praise`. What they want next. Prefer the specific label over `complaint` when one applies (asks for money back → `refund_request`, not `complaint`).
+
 ## language_code
 
 The ISO 639-1 code of the text you were given (`en`, `es`, `fr`, ...). Use `und` if you cannot tell. Classify the text in whatever language it arrives in.

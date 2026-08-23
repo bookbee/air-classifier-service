@@ -4,19 +4,18 @@
 # service itself is serving. Works whether air-classifier is running natively
 # (`make run` / `make start`) or as a container (`make up`).
 #
-# Shared dependencies belong to air-infra; this script only verifies they are
-# there and answering, and says where to go when they are not.
+# Redis is air-infra's; every model call (Tier 2 and Tier 3 both) is air-llm's.
+# This script only verifies they are there and answering, and says where to go
+# when they are not.
 #
 # Run via `make doctor`.
 set -uo pipefail
 
-OLLAMA="${OLLAMA:-container}"
-OLLAMA_URL="${OLLAMA_URL:-http://ollama:11434}"
 NETWORK="${NETWORK:-air-net}"
 INFRA_DIR="${INFRA_DIR:-../air-infra}"
+AIR_LLM_DIR="${AIR_LLM_DIR:-../air-llm}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8082}"
-MODEL="${OLLAMA_MODEL:-llama3.2:3b}"
 
 fail=0
 warn=0
@@ -26,7 +25,7 @@ bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; fail=$((fail + 1)); }
 note() { printf '  \033[33m!\033[0m %s\n' "$1"; warn=$((warn + 1)); }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-hdr "air-infra (shared dependencies)"
+hdr "air-infra (redis)"
 if ! docker info >/dev/null 2>&1; then
   bad "docker daemon unreachable — start Docker Desktop"
 elif docker network inspect "$NETWORK" >/dev/null 2>&1; then
@@ -35,60 +34,37 @@ else
   bad "network '$NETWORK' is missing — run 'cd $INFRA_DIR && make up'"
 fi
 
-# Addressed on the host, which is how the native inner loop reaches them and how
-# a developer verifies them regardless of where this service is running.
+# Addressed on the host, which is how the native inner loop reaches it and how
+# a developer verifies it regardless of where this service is running.
 if docker exec air-infra-redis-1 redis-cli -a localdevpass ping 2>/dev/null | grep -q PONG; then
   ok "redis answers an authenticated PING"
 else
   bad "air-infra's redis is not answering — 'cd $INFRA_DIR && make ps'"
 fi
 
-hdr "Tier 2 — ollama"
-# Report what the service is ACTUALLY configured with, not what this make
-# invocation happens to default to — a container started with `OLLAMA=native
-# make up` keeps its URL regardless of how doctor is later called.
+hdr "air-llm (tiers 2 and 3)"
+# Report what the service is ACTUALLY configured with, not a guess — a
+# container started against one air-llm keeps that URL regardless of what is
+# reachable when doctor is later called.
 container=$(docker ps --filter 'name=air-classifier-air-classifier' --format '{{.Names}}' 2>/dev/null | head -1)
 if [ -n "$container" ]; then
-  effective=$(docker exec "$container" printenv AIR_CLASSIFIER__PROVIDERS__OLLAMA__BASE_URL 2>/dev/null)
-  num_ctx=$(docker exec "$container" python -c \
-    'from air_classifier.config import Settings; print(Settings().providers.ollama.num_ctx)' 2>/dev/null)
-  ok "container $container dials ${effective:-<unset>}"
+  effective=$(docker exec "$container" printenv AIR_CLASSIFIER__AIR_LLM__BASE_URL 2>/dev/null)
+  ok "container $container dials ${effective:-<unset, defaults to http://localhost:8083>}"
+  probe_url="${effective:-http://127.0.0.1:8083}"
 else
   effective="(native run — from .env)"
-  num_ctx=$(grep -E '^AIR_CLASSIFIER__PROVIDERS__OLLAMA__NUM_CTX=' .env 2>/dev/null | cut -d= -f2)
-  ok "no container running; the native loop reads .env (mode flag: $OLLAMA → $OLLAMA_URL)"
+  ok "no container running; the native loop reads .env"
+  probe_url="http://127.0.0.1:8083"
 fi
-num_ctx="${num_ctx:-8192}"
+# host.docker.internal only resolves from inside a container; probe the host
+# loopback address here regardless of what the container itself is configured with.
+probe_url=$(printf '%s' "$probe_url" | sed 's/host\.docker\.internal/127.0.0.1/')
 
-if curl -sf -m 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-  ok "reachable on 127.0.0.1:11434"
-  if curl -s -m 3 http://127.0.0.1:11434/api/tags | grep -q "\"${MODEL}\""; then
-    ok "model '$MODEL' is present"
-  else
-    bad "model '$MODEL' is NOT pulled — Tier 2 reports unavailable and the ladder stops at t1"
-    note "  fix: cd $INFRA_DIR && OLLAMA=$OLLAMA make ollama-pull"
-  fi
-
-  # Ollama evicts and reloads a model when a request asks for a different
-  # num_ctx than the resident copy. That reload routinely outlasts Tier 2's
-  # timeout, so the first real request degrades even though nothing is broken —
-  # which reads as a bug and is not one.
-  resident=$(curl -s -m 3 http://127.0.0.1:11434/api/ps 2>/dev/null)
-  if printf '%s' "$resident" | grep -q "\"${MODEL}\""; then
-    loaded_ctx=$(printf '%s' "$resident" | tr ',' '\n' | grep -m1 context_length | grep -oE '[0-9]+')
-    if [ "${loaded_ctx:-0}" = "$num_ctx" ]; then
-      ok "resident at num_ctx=$num_ctx — first request will not trigger a reload"
-    else
-      note "resident at num_ctx=${loaded_ctx:-?}, this service asks for $num_ctx"
-      note "  the next request forces a reload and will likely blow Tier 2's timeout once"
-      note "  fix: cd $INFRA_DIR && make ollama-warm OLLAMA_NUM_CTX=$num_ctx"
-    fi
-  else
-    note "model not resident — the first request pays the load and may exceed Tier 2's timeout"
-    note "  fix: cd $INFRA_DIR && make ollama-warm OLLAMA_NUM_CTX=$num_ctx"
-  fi
+if curl -sf -m 3 "${probe_url}/v1/ready" >/dev/null 2>&1; then
+  ok "air-llm answers on ${probe_url}"
 else
-  note "nothing on 127.0.0.1:11434 — the ladder degrades to t1_classifier, which is not an error"
+  note "air-llm is not answering on ${probe_url} — ladder degrades to t1_classifier, which is not an error"
+  note "  fix: cd $AIR_LLM_DIR && make up"
 fi
 
 hdr "This service"
@@ -115,27 +91,18 @@ fi
 
 hdr "Port hygiene"
 # This repo must publish exactly one host port. Anything else here means a
-# shared component has crept back in and is re-binding a port air-infra owns.
+# shared component has crept back in and is re-binding a port air-infra or
+# air-llm owns.
 mine=$(docker ps --filter 'label=com.docker.compose.project=air-classifier' \
   --format '{{.Names}} {{.Ports}}' 2>/dev/null)
 if [ -z "$mine" ]; then
   ok "no air-classifier containers running (native mode)"
 else
-  shared=$(printf '%s\n' "$mine" | grep -Eo '0\.0\.0\.0:(6379|11434|9090|3000)' | sort -u)
+  shared=$(printf '%s\n' "$mine" | grep -Eo '0\.0\.0\.0:(6379|11434|8083|9090|3000)' | sort -u)
   if [ -z "$shared" ]; then
     ok "publishes only :$PORT — no shared ports re-bound"
   else
-    bad "re-binding port(s) air-infra owns: $(printf '%s ' $shared)"
-  fi
-fi
-
-# A gateway URL is only meaningful when gateway mode is on.
-if grep -qE '^AIR_CLASSIFIER__PROVIDERS__GATEWAY__ENABLED=true' .env 2>/dev/null; then
-  hdr "air-infra gateway (mode: on)"
-  if curl -sf -m 3 http://127.0.0.1:8080/v1/health >/dev/null 2>&1; then
-    ok "gateway healthy on :8080 — T2 and T3 route through it"
-  else
-    bad "gateway mode is ON but :8080 is not healthy — model calls will fail over to nothing"
+    bad "re-binding port(s) air-infra/air-llm owns: $(printf '%s ' $shared)"
   fi
 fi
 

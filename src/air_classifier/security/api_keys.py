@@ -31,11 +31,11 @@ logger = get_logger(__name__)
 #: and secret scanners. It is not secret and adds no entropy.
 KEY_PREFIX: Final[str] = "airc_"
 
-SCOPE_SENTIMENT_READ: Final[str] = "sentiment:read"
+SCOPE_CLASSIFY_READ: Final[str] = "classify:read"
 SCOPE_ADMIN_READ: Final[str] = "admin:read"
 
 #: What the development anonymous identity is granted.
-ALL_SCOPES: Final[frozenset[str]] = frozenset({SCOPE_SENTIMENT_READ, SCOPE_ADMIN_READ})
+ALL_SCOPES: Final[frozenset[str]] = frozenset({SCOPE_CLASSIFY_READ, SCOPE_ADMIN_READ})
 
 #: Stable id for the unauthenticated identity. Appears in metric labels, so it
 #: must stay a fixed string rather than anything per-request.

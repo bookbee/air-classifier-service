@@ -31,7 +31,7 @@ def _record(**overrides: Any) -> ApiKeyRecord:
         "id": "key-1",
         "name": "primary",
         "key_hash": hash_key(RAW_KEY, SALT),
-        "scopes": {"sentiment:read"},
+        "scopes": {"classify:read"},
     }
     fields.update(overrides)
     return ApiKeyRecord(**fields)
@@ -155,8 +155,8 @@ def test_record_defaults_match_the_contract() -> None:
 
 
 def test_has_scope_and_clamp_tier() -> None:
-    record = _record(scopes={"sentiment:read"}, max_tier=Tier.T1_CLASSIFIER)
-    assert record.has_scope("sentiment:read")
+    record = _record(scopes={"classify:read"}, max_tier=Tier.T1_CLASSIFIER)
+    assert record.has_scope("classify:read")
     assert not record.has_scope("admin:read")
     assert record.clamp_tier(Tier.T3_CLOUD_LLM) is Tier.T1_CLASSIFIER
     assert record.clamp_tier(Tier.T0_RULES) is Tier.T0_RULES
@@ -171,7 +171,7 @@ def test_load_from_inline_json_round_trips_every_field() -> None:
             "id": "key-a",
             "name": "restricted",
             "key_hash": hash_key(RAW_KEY, SALT),
-            "scopes": ["sentiment:read", "admin:read"],
+            "scopes": ["classify:read", "admin:read"],
             "max_tier": "t1_classifier",
             "force_pii_redaction": True,
             "rate_limit_rpm": 30,
@@ -183,7 +183,7 @@ def test_load_from_inline_json_round_trips_every_field() -> None:
     record = store.lookup(RAW_KEY)
     assert record is not None
     assert record.id == "key-a"
-    assert record.scopes == {"sentiment:read", "admin:read"}
+    assert record.scopes == {"classify:read", "admin:read"}
     assert record.max_tier is Tier.T1_CLASSIFIER
     assert record.force_pii_redaction is True
     assert record.rate_limit_rpm == 30

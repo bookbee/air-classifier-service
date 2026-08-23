@@ -4,7 +4,7 @@ Configuration is 12-factor: every value below is settable from the environment
 using the ``AIR_CLASSIFIER__`` prefix and ``__`` as the nesting delimiter, e.g.::
 
     AIR_CLASSIFIER__TIERS__T1__CONFIDENCE_FLOOR=0.85
-    AIR_CLASSIFIER__PROVIDERS__ANTHROPIC__MODEL=claude-haiku-4-5
+    AIR_CLASSIFIER__AIR_LLM__CLOUD_MODEL=classify-default
 
 Escalation thresholds live here rather than in code on purpose: tuning the
 ladder's cost/accuracy balance must never require deploying new logic, only new
@@ -17,10 +17,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from air_classifier.constants import Provider, Tier
+from air_classifier.constants import Tier
 
 # ── Application ───────────────────────────────────────────────────────────────
 
@@ -30,8 +30,8 @@ class AppSettings(BaseModel):
 
     env: Literal["development", "staging", "production", "test"] = "development"
     host: str = "0.0.0.0"  # noqa: S104 — containers bind all interfaces by design
-    # 8082 in the AIR port map (air-infra/README.md): 8080 belongs to the
-    # air-infra gateway, which this service calls as a provider.
+    # 8082 in the AIR port map (air-infra/README.md). Model calls go to
+    # air-llm (its own port, `air_llm.base_url`), not to anything on this map.
     port: int = Field(default=8082, ge=1, le=65535)
     workers: int = Field(default=2, ge=1, le=64)
     root_path: str = ""
@@ -58,32 +58,92 @@ class TierSettings(BaseModel):
     timeout_ms: int = Field(default=1000, ge=1, le=120_000)
 
 
+# Each rung's defaults live on its own subclass rather than in a
+# `default_factory` on TiersSettings, and that is load-bearing rather than
+# stylistic. pydantic-settings builds a nested model directly from whichever
+# leaves the environment supplies — the factory is never called — so with the
+# factory form, setting a single documented key like
+# `AIR_CLASSIFIER__TIERS__T0_RULES__ENABLED=true` silently reset that rung's
+# siblings to the *base class* defaults: T0's confidence floor fell 0.95 -> 0.80
+# (the floor is the whole safety argument for the shortcut rules) and T2's
+# timeout fell 6000ms -> 1000ms, below its own p50. As field defaults they are
+# part of the model, so a partial override changes only what it names.
+
+
+class T0RulesSettings(TierSettings):
+    """Rules. The floor is high because a shortcut either matched or it did not."""
+
+    confidence_floor: float = Field(default=0.95, ge=0.0, le=1.0)
+    timeout_ms: int = Field(default=5, ge=1, le=120_000)
+
+
+class T1ClassifierSettings(TierSettings):
+    """400ms, not the 200ms this service first shipped with.
+
+    That number was sized for a two- or three-class sequence-classification
+    head (~10ms warm). The default backend since docs/02-lld.md §12.6 is a
+    zero-shot NLI scorer running four forward passes per call, and it is
+    genuinely slower — measured warm, *inside the built container* rather
+    than on the host running it (Docker Desktop's virtualisation overhead
+    turned out to matter here): p50 173ms, p90 193ms, max 199ms against the
+    old 200ms ceiling. That is not "close to the edge", it already lost
+    samples to it — a fraction of production traffic would have silently paid
+    T2's latency for a rung that was in fact available and would have
+    answered a moment later. 400ms leaves roughly 2x headroom over the
+    observed max, the same margin T2's own timeout was tuned to when this
+    codebase last measured a tier's real behaviour instead of guessing.
+    """
+
+    confidence_floor: float = Field(default=0.80, ge=0.0, le=1.0)
+    margin_floor: float = Field(default=0.25, ge=0.0, le=1.0)
+    timeout_ms: int = Field(default=400, ge=1, le=120_000)
+
+
+class T2LocalLlmSettings(TierSettings):
+    """6s, not the 4s the LLD first guessed.
+
+    Measured on the model `air_llm.local_model` currently resolves to, on CPU,
+    with the compact prompt: p50 1.5s, p90 3.3s. A 4s ceiling left no headroom
+    over p90 and lost every cold model load outright. That measurement is
+    specific to today's local model — a different one behind the same alias
+    could need this revisited. Note the request-level `latency_budget_ms` is
+    usually the binding constraint anyway — the orchestrator takes min(tier
+    timeout, remaining budget).
+    """
+
+    confidence_floor: float = Field(default=0.72, ge=0.0, le=1.0)
+    margin_floor: float = Field(default=0.20, ge=0.0, le=1.0)
+    timeout_ms: int = Field(default=6000, ge=1, le=120_000)
+
+
+class T3CloudLlmSettings(TierSettings):
+    confidence_floor: float = Field(default=0.65, ge=0.0, le=1.0)
+    margin_floor: float = Field(default=0.15, ge=0.0, le=1.0)
+    timeout_ms: int = Field(default=8000, ge=1, le=120_000)
+
+
 class TiersSettings(BaseModel):
     """Defaults mirror the thresholds table in docs/02-lld.md §5."""
 
-    t0_rules: TierSettings = Field(
-        default_factory=lambda: TierSettings(confidence_floor=0.95, timeout_ms=5)
-    )
-    t1_classifier: TierSettings = Field(
-        default_factory=lambda: TierSettings(
-            confidence_floor=0.80, margin_floor=0.25, timeout_ms=200
-        )
-    )
-    #: 6s, not the 4s the LLD first guessed. Measured on llama3.2:3b/CPU with the
-    #: compact prompt: p50 1.5s, p90 3.3s. A 4s ceiling left no headroom over p90
-    #: and lost every cold model load outright. Note the request-level
-    #: `latency_budget_ms` is usually the binding constraint anyway — the
-    #: orchestrator takes min(tier timeout, remaining budget).
-    t2_local_llm: TierSettings = Field(
-        default_factory=lambda: TierSettings(
-            confidence_floor=0.72, margin_floor=0.20, timeout_ms=6000
-        )
-    )
-    t3_cloud_llm: TierSettings = Field(
-        default_factory=lambda: TierSettings(
-            confidence_floor=0.65, margin_floor=0.15, timeout_ms=8000
-        )
-    )
+    t0_rules: T0RulesSettings = Field(default_factory=T0RulesSettings)
+    t1_classifier: T1ClassifierSettings = Field(default_factory=T1ClassifierSettings)
+    t2_local_llm: T2LocalLlmSettings = Field(default_factory=T2LocalLlmSettings)
+    t3_cloud_llm: T3CloudLlmSettings = Field(default_factory=T3CloudLlmSettings)
+
+    @field_validator("t0_rules", "t1_classifier", "t2_local_llm", "t3_cloud_llm", mode="before")
+    @classmethod
+    def _merge_onto_rung_defaults(cls, value: object) -> object:
+        """Let a caller hand in a bare ``TierSettings`` and keep the rung's defaults.
+
+        ``TiersSettings(t2_local_llm=TierSettings(timeout_ms=4000))`` reads as
+        "change the timeout", not "reset this rung and change the timeout", and
+        the base class carries generic defaults that would quietly do the latter.
+        Forwarding only the fields the caller actually set gives programmatic
+        construction the same merge semantics the environment path has.
+        """
+        if type(value) is TierSettings:
+            return value.model_dump(exclude_unset=True)
+        return value
 
     #: Escalate when input is longer than this many tokens and other signals are weak.
     long_input_tokens: int = Field(default=120, ge=1)
@@ -96,90 +156,70 @@ class TiersSettings(BaseModel):
         return getattr(self, tier.value)  # type: ignore[no-any-return]
 
 
-# ── Providers ─────────────────────────────────────────────────────────────────
+# ── Model access ──────────────────────────────────────────────────────────────
 
 
-class AnthropicSettings(BaseModel):
-    api_key: SecretStr | None = None
-    base_url: str | None = None
-    model: str = "claude-haiku-4-5"
-    arbiter_model: str = "claude-sonnet-5"
-    arbitration_enabled: bool = True
-    arbitration_floor: float = Field(default=0.65, ge=0.0, le=1.0)
-    max_tokens: int = Field(default=1024, ge=64, le=8192)
-    arbiter_max_tokens: int = Field(default=2048, ge=64, le=16384)
-    timeout_s: float = Field(default=20.0, gt=0)
-    max_retries: int = Field(default=2, ge=0, le=8)
-    prompt_cache_enabled: bool = True
-    prompt_cache_ttl: Literal["5m", "1h"] = "1h"
+class AirLlmSettings(BaseModel):
+    """Every model call — Tier 2 and Tier 3 both — routes through air-llm.
 
-    @property
-    def configured(self) -> bool:
-        return self.api_key is not None
+    air-llm is the platform's single model gateway: it owns the provider keys,
+    cross-vendor routing and failover, cost accounting and caching. Which
+    concrete model or vendor answers a given call is entirely air-llm's
+    decision, made from its own config (``deploy/routing.yaml`` in the air-llm
+    repo) — this service names only its *own* aliases below and never a
+    vendor or model directly, and holds no provider SDKs or credentials of
+    its own. What stays this service's job is the escalation decision: is the
+    answer air-llm returned good enough, or does the ladder climb (§6,
+    docs/02-lld.md)? air-llm is the enabler that makes a better answer
+    reachable at all; which one, and at what cost, is a routing decision this
+    service deliberately does not make or hardcode.
 
+    All three aliases below are this service's *own* — defined in air-llm's
+    routing config for air-classifier specifically, not shared general-purpose
+    aliases another consumer might repoint for its own needs. Two are single
+    entries with no cross-vendor failover by design; one is not, and the
+    difference is deliberate, not an inconsistency:
 
-class OpenAISettings(BaseModel):
-    api_key: SecretStr | None = None
-    base_url: str | None = None
-    model: str = "gpt-4.1-mini"
-    arbiter_model: str = "gpt-4.1"
-    arbitration_enabled: bool = True
-    arbitration_floor: float = Field(default=0.65, ge=0.0, le=1.0)
-    max_tokens: int = Field(default=1024, ge=64, le=8192)
-    arbiter_max_tokens: int = Field(default=2048, ge=64, le=16384)
-    timeout_s: float = Field(default=20.0, gt=0)
-    max_retries: int = Field(default=2, ge=0, le=8)
-
-    @property
-    def configured(self) -> bool:
-        return self.api_key is not None
-
-
-class OllamaSettings(BaseModel):
-    enabled: bool = True
-    base_url: str = "http://localhost:11434"
-    model: str = "llama3.2:3b"
-    timeout_s: float = Field(default=15.0, gt=0)
-    #: Must exceed the compact system prompt plus the longest input we accept.
-    #: Undersizing it does not error — Ollama silently truncates the prompt, so
-    #: the model loses its rubric and we never find out. `test_prompts.py` guards
-    #: the relationship between this value and the compact prompt's length.
-    num_ctx: int = Field(default=8192, ge=512)
-    keep_alive: str = "10m"
-
-
-class GatewaySettings(BaseModel):
-    """Route every model call through the air-infra gateway instead of the SDKs.
-
-    When ``enabled``, the tiers' providers become thin clients that POST to
-    air-infra, which owns the provider keys, routing, cost and cache. The models
-    named in ``anthropic``/``openai``/``ollama`` above still choose *which* model
-    each rung asks for; only the transport changes. Off by default so a
-    deployment without air-infra keeps talking to the providers directly.
+    - ``local_model`` (Tier 2) resolves to exactly one provider. A local
+      runtime being down must fail this call cleanly so *this* service's own
+      ladder escalates to Tier 3, rather than air-llm silently substituting a
+      different tier of model under the Tier-2 label — which would blur tier
+      attribution and cost accounting.
+    - ``cloud_model`` (Tier 3's default call) and ``arbiter_model`` (Tier 3's
+      second opinion) each resolve to an ordered, cross-vendor chain — an
+      outage on one vendor must not remove the whole tier, and that failover
+      *is* air-llm's job now, not a registry in this codebase.
     """
 
-    enabled: bool = False
-    base_url: str = "http://localhost:8080"
-    #: air-infra service token, sent as ``X-API-Key``. Replaces the raw provider
-    #: keys, which in gateway mode live only in air-infra.
-    api_key: SecretStr | None = None
+    enabled: bool = True
+    base_url: str = "http://localhost:8083"
+    #: air-llm service token, sent as ``X-API-Key``. air-llm's own policy
+    #: grants the "air-classifier" service `[chat, embeddings]` on `inference`.
+    token: SecretStr | None = None
     timeout_s: float = Field(default=20.0, gt=0)
-    max_retries: int = Field(default=2, ge=0, le=8)
+
+    # Tier 2 — local, a single-entry alias (see class docstring).
+    local_model: str = "classify-local"
+
+    # Tier 3 — cloud, cross-vendor-failover aliases, each owned by this service.
+    cloud_model: str = "classify-default"
+    arbiter_model: str = "classify-arbiter"
+    arbitration_enabled: bool = True
+    arbitration_floor: float = Field(default=0.65, ge=0.0, le=1.0)
+    #: Sized for whichever provider an alias's chain might actually reach, not
+    #: just the primary one — some providers in the configured chains bill
+    #: reasoning ("thinking") tokens as output, which can starve a ceiling
+    #: sized only for the cheapest member before the model ever reaches the
+    #: closing brace of the structured response. Verified live against this
+    #: service's own ~8.8k-token system prompt (§6, docs/02-lld.md's
+    #: changelog): 1024 was not enough headroom for that failure mode and
+    #: read as a schema-parsing bug rather than what it was.
+    max_tokens: int = Field(default=2048, ge=64, le=8192)
+    arbiter_max_tokens: int = Field(default=4096, ge=64, le=16384)
 
     @property
     def configured(self) -> bool:
-        return self.enabled and self.api_key is not None
-
-
-class ProvidersSettings(BaseModel):
-    #: Cloud failover order. The first healthy, configured, closed-breaker entry wins.
-    preference: list[Provider] = Field(
-        default_factory=lambda: [Provider.ANTHROPIC, Provider.OPENAI]
-    )
-    anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
-    openai: OpenAISettings = Field(default_factory=OpenAISettings)
-    ollama: OllamaSettings = Field(default_factory=OllamaSettings)
-    gateway: GatewaySettings = Field(default_factory=GatewaySettings)
+        return self.enabled and self.token is not None
 
 
 # ── Classifier (Tier 1) ───────────────────────────────────────────────────────
@@ -195,6 +235,14 @@ class ClassifierSettings(BaseModel):
 
     model_path: Path | None = None
     tokenizer_path: Path | None = None
+    #: Which ONNX backend `model_path` is expected to be — the two are not
+    #: interchangeable at the same artifact (`pipeline/tiers/scorers.py`'s
+    #: module docstring). `zero_shot_nli` is the default: a quantised
+    #: DeBERTa-v3 entailment head, general-purpose and not tied to one fixed
+    #: label set. `sequence_classification` is the SST-2-family shape this
+    #: service shipped with first, kept working for a deployment that already
+    #: baked that artifact in.
+    scorer_kind: Literal["zero_shot_nli", "sequence_classification"] = "zero_shot_nli"
     #: Temperature-scaling parameter fitted on the calibration set. 1.0 = uncalibrated.
     calibration_temperature: float = Field(default=1.0, gt=0.0, le=10.0)
     #: Weight of the lexicon score when blending with the neural score.
@@ -277,7 +325,7 @@ class Settings(BaseSettings):
 
     app: AppSettings = Field(default_factory=AppSettings)
     tiers: TiersSettings = Field(default_factory=TiersSettings)
-    providers: ProvidersSettings = Field(default_factory=ProvidersSettings)
+    air_llm: AirLlmSettings = Field(default_factory=AirLlmSettings)
     classifier: ClassifierSettings = Field(default_factory=ClassifierSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
     resilience: ResilienceSettings = Field(default_factory=ResilienceSettings)

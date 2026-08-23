@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from air_classifier.config import Settings
-from air_classifier.constants import EscalationReason, Label, ResourceKind, Tier
+from air_classifier.constants import EscalationReason, Label, Tier
 from air_classifier.pipeline.features import extract_features
 from air_classifier.pipeline.tiers.base import Tier as TierProtocol
 from air_classifier.pipeline.tiers.base import TierContext
@@ -29,7 +29,6 @@ from air_classifier.schemas.verdict import TierVerdict
 def make_ctx(
     text: str,
     *,
-    resource: ResourceKind = ResourceKind.SENTIMENT,
     language: LanguageInfo | None = None,
     **resource_fields: Any,
 ) -> TierContext:
@@ -37,7 +36,6 @@ def make_ctx(
     score = score_text(text)
     return TierContext(
         request_id="req-t0",
-        resource=resource,
         text=text,
         original_length=len(text),
         language=language or detect_language(text),
@@ -50,7 +48,7 @@ def make_ctx(
 
 
 def review_ctx(text: str, rating: Any, scale: Any = 5.0) -> TierContext:
-    return make_ctx(text, resource=ResourceKind.REVIEWS, rating=rating, rating_scale_max=scale)
+    return make_ctx(text, rating=rating, rating_scale_max=scale)
 
 
 @pytest.fixture
@@ -168,14 +166,6 @@ async def test_five_stars_with_a_short_contradicting_body_does_not_shortcut(
 
 async def test_mid_scale_rating_does_not_shortcut(tier: RulesTier) -> None:
     verdict = await tier.analyse(review_ctx("Delivered Tuesday.", 3.0))
-
-    assert_abstained(verdict)
-
-
-async def test_rating_outside_a_review_is_ignored(tier: RulesTier) -> None:
-    # Only the reviews endpoint populates `rating`; a key of that name arriving
-    # on another resource did not come from a validated request model.
-    verdict = await tier.analyse(make_ctx("Delivered Tuesday.", rating=5.0))
 
     assert_abstained(verdict)
 

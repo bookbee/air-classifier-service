@@ -108,11 +108,11 @@ def test_catalogue_matches_the_lld(error: AppError, slug: str, status: int) -> N
     """Every entry in docs/02-lld.md §9, with its exact slug and status."""
     assert error.slug == slug
     assert error.status == status
-    problem = error.to_problem(instance="/v1/sentiment", request_id="req_1")
+    problem = error.to_problem(instance="/v1/classify", request_id="req_1")
     assert problem.type == f"{ERROR_TYPE_BASE}/{slug}"
     assert problem.status == status
     assert problem.title == error.title
-    assert problem.instance == "/v1/sentiment"
+    assert problem.instance == "/v1/classify"
     assert problem.request_id == "req_1"
 
 

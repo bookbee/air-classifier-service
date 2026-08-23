@@ -26,7 +26,7 @@ from typing import Final
 
 from air_classifier.cache.base import CacheBackend
 from air_classifier.config import Settings
-from air_classifier.constants import EscalationReason, Label, ResourceKind, Tier
+from air_classifier.constants import EscalationReason, Label, Tier
 from air_classifier.observability.logging import get_logger, safe_text_fields
 from air_classifier.pipeline.tiers.base import TierContext
 from air_classifier.preprocess.lexicon import EMOJI_POLARITY, LexiconScore, score_text
@@ -72,7 +72,7 @@ _MAX_SHORTCUT_CONFIDENCE: Final[float] = max(
 RATING_LOW_FRACTION: Final[float] = 0.20
 RATING_HIGH_FRACTION: Final[float] = 0.80
 
-#: Assumed when a review carries a rating but no scale, matching `ReviewRequest`.
+#: Assumed when a request carries a rating but no scale, matching `ClassifyRequest`.
 DEFAULT_RATING_SCALE: Final[float] = 5.0
 
 #: Longest prose the rating rule tolerates. This bound is the *entire* safety
@@ -133,6 +133,10 @@ class RulesTier:
     async def is_available(self) -> bool:
         """Always true: there is nothing here that can be down."""
         return True
+
+    async def unavailable_reason(self) -> str | None:
+        """Never called for real — `is_available` never reports False."""
+        return None
 
     def supports_language(self, code: str) -> bool:
         """True for every language.
@@ -303,12 +307,7 @@ def _abstain(latency_ms: float) -> TierVerdict:
 
 
 def _decisive_rating(ctx: TierContext) -> float | None:
-    """The review's rating on -1..+1, when it is present and extreme."""
-    if ctx.resource is not ResourceKind.REVIEWS:
-        # Only reviews carry a rating. A `rating` key on any other resource came
-        # from somewhere we do not control.
-        return None
-
+    """The caller's star rating on -1..+1, when one was given and is extreme."""
     rating = _as_number(ctx.resource_fields.get("rating"))
     scale = _as_number(ctx.resource_fields.get("rating_scale_max"))
     if scale is None:

@@ -7,6 +7,16 @@ a member is a breaking change for callers and dashboards alike.
 `EscalationReason` in particular is deliberately a *closed* set. It is used as a
 Prometheus label value, and an open-ended reason string would let label
 cardinality grow without bound.
+
+**Label compatibility.** `Label`, `Tone`, `Topic`, `Intent`, `Urgency`,
+`RoutingPriority`, `Actionability` and `RatingAgreement` are this service's
+response vocabulary, consumed by callers
+that may branch on specific values. Adding a member is safe; removing one,
+changing its meaning, or a retraining that shifts which inputs map to which
+label (even with the member names untouched) is not — a cached verdict from
+before the change would misrepresent one from after it. Any of those bumps
+`cache.base.CACHE_SCHEMA_VERSION`, the mechanism that currently plays the role
+a separately-versioned taxonomy contract would in a larger deployment.
 """
 
 from __future__ import annotations
@@ -67,15 +77,8 @@ class Provider(StrEnum):
 
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
+    GEMINI = "gemini"
     OLLAMA = "ollama"
-
-
-class ResourceKind(StrEnum):
-    """Which endpoint family a request arrived through."""
-
-    SENTIMENT = "sentiment"
-    FEEDBACK = "feedback"
-    REVIEWS = "reviews"
 
 
 class EscalationReason(StrEnum):
@@ -122,9 +125,22 @@ STOP_REASONS: Final[frozenset[EscalationReason]] = frozenset(
     }
 )
 
+#: The subset of `STOP_REASONS` an `escalation_trace` step renders as `null`
+#: (schemas/verdict.py::EscalationStep.build) rather than the reason code
+#: itself. `CONFIDENT`, `CACHE_HIT` and a caller-chosen ceiling
+#: (`TIER_CEILING`/`BUDGET_EXHAUSTED`/`COST_CEILING`) are the ladder finishing
+#: on its own terms — nothing for a caller to act on. `NEXT_TIER_UNAVAILABLE`
+#: is the opposite: the policy *wanted* to climb and a dependency wasn't
+#: there, which is exactly the gap `pipeline.orchestrator` also flags as
+#: `degraded` and worth surfacing rather than folding into the same silence
+#: a confident answer gets.
+SILENT_STOP_REASONS: Final[frozenset[EscalationReason]] = STOP_REASONS - {
+    EscalationReason.NEXT_TIER_UNAVAILABLE
+}
+
 
 class Urgency(StrEnum):
-    """How soon a piece of feedback needs a human."""
+    """How soon a piece of text needs a human."""
 
     LOW = "low"
     MEDIUM = "medium"
@@ -133,7 +149,7 @@ class Urgency(StrEnum):
 
 
 class Actionability(StrEnum):
-    """Whether feedback implies work."""
+    """Whether a piece of text implies work for someone."""
 
     NONE = "none"
     INFORMATIONAL = "informational"
@@ -141,8 +157,70 @@ class Actionability(StrEnum):
     BLOCKING = "blocking"
 
 
+class Tone(StrEnum):
+    """The emotional register of the text — finer-grained than sentiment.
+
+    Distinct from `Emotion` (schemas/common.py), which is free-named and
+    multi-valued with per-item intensity; this is a single closed-vocabulary
+    label with one confidence, the same shape as `Label` and `Urgency`,
+    because it answers one question: which one word best names the author's
+    register.
+    """
+
+    NEUTRAL = "neutral"
+    SATISFIED = "satisfied"
+    FRUSTRATED = "frustrated"
+    ANGRY = "angry"
+    DISAPPOINTED = "disappointed"
+    CONFUSED = "confused"
+    ANXIOUS = "anxious"
+    SARCASTIC = "sarcastic"
+    APPRECIATIVE = "appreciative"
+    URGENT = "urgent"
+
+
+class Topic(StrEnum):
+    """What the text is about. Multi-label — a text may raise several."""
+
+    DELIVERY = "delivery"
+    PAYMENT = "payment"
+    PRODUCT_QUALITY = "product_quality"
+    RETURN = "return"
+    REFUND = "refund"
+    PRICING = "pricing"
+
+
+class Intent(StrEnum):
+    """What the author wants done. Single-label."""
+
+    COMPLAINT = "complaint"
+    INFORMATION = "information"
+    REFUND_REQUEST = "refund_request"
+    RETURN_REQUEST = "return_request"
+    ORDER_TRACKING = "order_tracking"
+    REPLACEMENT_REQUEST = "replacement_request"
+    CANCELLATION = "cancellation"
+    RECOMMENDATION = "recommendation"
+    PRAISE = "praise"
+
+
+class RoutingPriority(StrEnum):
+    """Incident-style priority for `routing.priority`.
+
+    A direct rank mapping of `Urgency` (`CRITICAL`->`P1` ... `LOW`->`P4`) rather
+    than a second judgement: two independently-derived urgency signals on one
+    response would invite them to disagree, which is a worse outcome than one
+    signal expressed twice.
+    """
+
+    P1 = "P1"
+    P2 = "P2"
+    P3 = "P3"
+    P4 = "P4"
+
+
 class RatingAgreement(StrEnum):
-    """Whether a review's prose matches its star rating."""
+    """Whether a text's prose matches the star rating given alongside it."""
 
     AGREES = "agrees"
     PROSE_MORE_POSITIVE = "prose_more_positive"

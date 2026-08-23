@@ -188,16 +188,17 @@ class AccessLogMiddleware:
     def _endpoint(scope: Scope) -> str:
         """The route *template*, never the resolved path.
 
-        `/v1/reviews/{review_id}` is one time series; the concrete paths are
-        unbounded. The router writes the matched route onto the scope before the
-        response is sent, so it is available by the time this runs.
+        A hypothetical `/v1/classify/{id}` is one time series; the concrete
+        paths under it would be unbounded. The router writes the matched route
+        onto the scope before the response is sent, so it is available by the
+        time this runs.
 
         The matched route's own ``path`` is *not* usable directly. FastAPI 0.141
         resolves an included router lazily, so a route declared on a sub-router
-        reports the path relative to the router that declared it — `/sentiment`,
-        never `/v1/sentiment`. Labelling on that would drop the version prefix
-        every dashboard filters on, and would silently merge `/v1/sentiment`
-        with a future `/v2/sentiment` into one series.
+        reports the path relative to the router that declared it — `/classify`,
+        never `/v1/classify`. Labelling on that would drop the version prefix
+        every dashboard filters on, and would silently merge `/v1/classify`
+        with a future `/v2/classify` into one series.
 
         So the template is rebuilt from the request path by putting the matched
         path parameters back. If any parameter cannot be substituted the

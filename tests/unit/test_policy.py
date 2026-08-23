@@ -22,7 +22,7 @@ from air_classifier.config import (
     TiersSettings,
 )
 from air_classifier.constants import EscalationReason as Reason
-from air_classifier.constants import Label, ResourceKind, Tier
+from air_classifier.constants import Label, Tier
 from air_classifier.pipeline.policy import EscalationPolicy
 from air_classifier.pipeline.tiers.base import TierContext
 from air_classifier.schemas.common import (
@@ -54,7 +54,6 @@ def make_ctx(
 ) -> TierContext:
     return TierContext(
         request_id="req_test",
-        resource=ResourceKind.SENTIMENT,
         text="the battery lasts all day",
         original_length=25,
         language=language or LanguageInfo(code="en", confidence=0.99),

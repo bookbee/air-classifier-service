@@ -17,6 +17,16 @@ back into a pile of special cases:
   outright defects all become a failed verdict; the ladder continues and
   ``degraded`` is set. "Degrade, don't fail" is not a slogan here, it is this
   ``try`` block.
+
+``degraded`` covers a second case beyond an outright failure: a verdict that
+succeeded but was not good enough, with nothing further up the ladder able to
+serve. T0 and T1 have no external dependency and cannot land here; T2 and T3
+can, whenever a downstream service is down or not yet reachable. That is a
+capability gap, not a defect in this rung, and it gets the same
+``degraded: true`` treatment plus a distinct ``ladder.capacity_gap`` warning —
+console-visible and, via the response's own ``escalation_trace``, visible to
+the caller too, so either side can tell "confident" and "stuck below where the
+ladder wanted to be" apart.
 """
 
 from __future__ import annotations
@@ -26,6 +36,7 @@ import time
 from collections.abc import Sequence
 
 from air_classifier.config import Settings
+from air_classifier.constants import EscalationReason
 from air_classifier.constants import Tier as TierId
 from air_classifier.observability.logging import get_logger, safe_text_fields
 from air_classifier.observability.metrics import (
@@ -75,7 +86,9 @@ class Orchestrator:
         steps: list[EscalationStep] = []
         degraded = False
 
-        for position, tier in enumerate(ladder):
+        position = 0
+        while position < len(ladder):
+            tier = ladder[position]
             timeout_s = self._timeout_s(tier, ctx)
             if timeout_s <= 0.0:
                 # Starting a rung that cannot finish buys nothing but latency.
@@ -97,9 +110,14 @@ class Orchestrator:
             verdicts.append(verdict)
             ctx = ctx.with_verdict(verdict)
 
-            next_tier = ladder[position + 1] if position + 1 < len(ladder) else None
+            # The lookahead spans the *rest of the ladder*, not just the adjacent
+            # rung: a dead rung one hop up must not mask a healthy one two hops
+            # up. `next_position` is the absolute index of the nearest rung above
+            # `position` that can serve, or None if nothing above can.
+            next_position = await self._next_available_position(ladder, position + 1)
+            next_tier = ladder[next_position] if next_position is not None else None
             decision = self._policy.decide(
-                verdict, ctx, next_available=await self._can_serve(next_tier)
+                verdict, ctx, next_available=next_tier is not None
             )
             steps.append(EscalationStep.build(verdict, decision))
             record_tier_decision(tier.tier, _outcome_of(verdict, escalate=decision.escalate))
@@ -117,11 +135,44 @@ class Orchestrator:
                 **safe_text_fields(ctx.text, self._settings),
             )
 
+            # A verdict that succeeded but was not good enough, with nothing
+            # further up the ladder to hand it to, is a capability gap — the
+            # caller is getting a worse answer than the ladder's own thresholds
+            # call acceptable, purely because a dependency was not there. That
+            # is "degrade, don't fail" too, not only an outright tier failure:
+            # `degraded` (and hence the response `degraded` field) must say so,
+            # and this is the one stop reason `EscalationStep.build` does not
+            # collapse to null, so a caller sees it in the same place.
+            capacity_gap = (
+                not decision.escalate
+                and decision.primary_reason is EscalationReason.NEXT_TIER_UNAVAILABLE
+            )
+            if capacity_gap:
+                degraded = True
+                _log.warning(
+                    "ladder.capacity_gap",
+                    request_id=ctx.request_id,
+                    stopped_at=tier.tier.value,
+                    confidence=round(verdict.result.confidence, 4),
+                    reasons=[reason.value for reason in decision.reasons],
+                )
+
             if not decision.escalate:
                 break
-            if next_tier is not None:
-                for reason in decision.reasons:
-                    record_escalation(tier.tier, next_tier.tier, reason)
+            # The policy only escalates when the lookahead found a servable rung,
+            # so both are guaranteed here — this is not a second check.
+            assert next_position is not None
+            assert next_tier is not None
+            for reason in decision.reasons:
+                record_escalation(tier.tier, next_tier.tier, reason)
+            for skipped in ladder[position + 1 : next_position]:
+                _log.warning(
+                    "tier.skipped",
+                    request_id=ctx.request_id,
+                    tier=skipped.tier.value,
+                    reason="unavailable",
+                )
+            position = next_position
 
         best = self._policy.select_best(verdicts)
         if best is None:
@@ -180,6 +231,20 @@ class Orchestrator:
             model_version=tier.model_version,
             latency_ms=(time.perf_counter() - started) * 1000.0,
         )
+
+    async def _next_available_position(
+        self, ladder: Sequence[Tier], from_position: int
+    ) -> int | None:
+        """Index of the nearest servable rung at or after `from_position`.
+
+        Walks the ladder in order rather than probing every remaining rung up
+        front: most requests climb at most once, so paying for a probe past the
+        rung that actually answers is wasted work most of the time.
+        """
+        for index in range(from_position, len(ladder)):
+            if await self._can_serve(ladder[index]):
+                return index
+        return None
 
     @staticmethod
     async def _can_serve(tier: Tier | None) -> bool:

@@ -12,7 +12,6 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from air_classifier.constants import ResourceKind
 from air_classifier.constants import Tier as TierId
 from air_classifier.schemas.common import (
     ComplexityFeatures,
@@ -45,7 +44,6 @@ class TierContext(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     request_id: str
-    resource: ResourceKind
 
     #: Normalised and, when enabled, PII-redacted. This is what tiers analyse.
     text: str
@@ -58,7 +56,8 @@ class TierContext(BaseModel):
 
     context: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
-    #: Resource-specific inputs (rating, channel, subject, ...) as a flat mapping.
+    #: The caller's optional fields (rating, channel, subject, ...) as a flat
+    #: mapping — see `schemas/classify.py::ClassifyRequest`.
     resource_fields: dict[str, Any] = Field(default_factory=dict)
 
     options: Options
@@ -108,6 +107,18 @@ class Tier(Protocol):
 
         Must be cheap and must not raise — a probe that throws is treated as
         unavailable. Used by readiness and by the policy's lookahead.
+        """
+        ...
+
+    async def unavailable_reason(self) -> str | None:
+        """Why `is_available()` last reported ``False``, for an operator.
+
+        Called only when it did — never on the orchestrator's own hot path,
+        so it can afford to be more specific than `is_available()` needs to
+        be. `None` when available, or when the cause genuinely is not known;
+        must not raise. `/v1/ready` and `/v1/capabilities` are its only
+        callers — this is what turns "reported unavailable" into something an
+        operator can act on without reading this service's own logs first.
         """
         ...
 

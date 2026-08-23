@@ -272,18 +272,18 @@ async def test_metrics_label_keeps_the_router_prefix(app_settings: Settings) -> 
 
     FastAPI 0.141 resolves included routers lazily, so the matched route reports
     the path relative to the router that declared it. Labelling on that would
-    publish `/sentiment` for `/v1/sentiment` — dropping the version prefix every
+    publish `/ping` for `/v1/ping` — dropping the version prefix every
     dashboard filters on, and merging a future `/v2` into the same series.
     """
     inner = APIRouter()
 
-    @inner.get("/sentiment")
-    async def sentiment() -> dict[str, bool]:
+    @inner.get("/ping")
+    async def ping() -> dict[str, bool]:
         return {"ok": True}
 
-    @inner.get("/reviews/{review_id}")
-    async def review(review_id: str) -> dict[str, str]:
-        return {"review_id": review_id}
+    @inner.get("/widgets/{widget_id}")
+    async def widget(widget_id: str) -> dict[str, str]:
+        return {"widget_id": widget_id}
 
     v1 = APIRouter(prefix="/v1")
     v1.include_router(inner)
@@ -294,13 +294,13 @@ async def test_metrics_label_keeps_the_router_prefix(app_settings: Settings) -> 
 
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        await http.get("/v1/sentiment")
-        await http.get("/v1/reviews/abc")
-        await http.get("/v1/reviews/def")
+        await http.get("/v1/ping")
+        await http.get("/v1/widgets/abc")
+        await http.get("/v1/widgets/def")
 
-    assert request_count("/v1/sentiment", 200, "anonymous") == 1.0
+    assert request_count("/v1/ping", 200, "anonymous") == 1.0
     # Prefix kept *and* the path parameter still collapsed to its template.
-    assert request_count("/v1/reviews/{review_id}", 200, "anonymous") == 2.0
+    assert request_count("/v1/widgets/{widget_id}", 200, "anonymous") == 2.0
 
 
 async def test_unmatched_routes_do_not_grow_metric_cardinality(

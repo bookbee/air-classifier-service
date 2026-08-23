@@ -1,4 +1,4 @@
-"""The HTTP-facing seam: `AnalysisService` and its per-resource shaping.
+"""The HTTP-facing seam: `AnalysisService` and its response shaping.
 
 The orchestrator is a scripted stub throughout. That is the point of the seam —
 everything asserted here is preprocessing, caching, response shaping and batch
@@ -17,35 +17,36 @@ from air_classifier.cache.memory import MemoryCache
 from air_classifier.config import AppSettings, ClassifierSettings, Settings
 from air_classifier.constants import (
     Actionability,
+    Intent,
     Label,
     RatingAgreement,
-    ResourceKind,
+    RoutingPriority,
     Tier,
+    Tone,
+    Topic,
     Urgency,
 )
 from air_classifier.pipeline.orchestrator import NoVerdictError, Orchestrator
 from air_classifier.pipeline.service import (
     AnalysisService,
+    _derive_actionability,
+    _derive_requires_human,
     _derive_route,
+    _derive_routing,
     _derive_urgency,
-    _shape_feedback,
-    _shape_review,
-    _shape_sentiment,
+    _rating_consistency,
 )
 from air_classifier.pipeline.tiers.base import TierContext
+from air_classifier.schemas.classify import ClassifyRequest
 from air_classifier.schemas.common import (
     Aspect,
     Emotion,
-    LanguageInfo,
+    LabeledScore,
     Options,
-    RequestUsage,
-    SafetyReport,
     SentimentResult,
     TierUsage,
 )
 from air_classifier.schemas.errors import ProblemDetail
-from air_classifier.schemas.requests import FeedbackRequest, ReviewRequest, SentimentRequest
-from air_classifier.schemas.responses import BaseAnalysisResponse
 from air_classifier.schemas.verdict import (
     EscalationStep,
     OrchestrationResult,
@@ -102,6 +103,9 @@ def make_verdict(
     confidence: float = 0.9,
     aspects: list[Aspect] | None = None,
     emotions: list[Emotion] | None = None,
+    tone: LabeledScore[Tone] | None = None,
+    topics: list[LabeledScore[Topic]] | None = None,
+    intent: LabeledScore[Intent] | None = None,
     usage: TierUsage | None = None,
 ) -> TierVerdict:
     return TierVerdict(
@@ -110,6 +114,9 @@ def make_verdict(
         result=SentimentResult(label=label, polarity=polarity, confidence=confidence),
         aspects=aspects or [],
         emotions=emotions or [],
+        tone=tone,
+        topics=topics or [],
+        intent=intent,
         usage=usage or TierUsage(),
     )
 
@@ -141,23 +148,6 @@ def build_service(
     return AnalysisService(cast("Orchestrator", orchestrator), settings, cache)
 
 
-def envelope(
-    *,
-    sentiment: SentimentResult | None = None,
-    aspects: list[Aspect] | None = None,
-) -> BaseAnalysisResponse:
-    """A minimal common envelope, for exercising the shapers on their own."""
-    return BaseAnalysisResponse(
-        request_id="req_test",
-        sentiment=sentiment or SentimentResult(label=Label.POSITIVE, polarity=0.8, confidence=0.9),
-        aspects=aspects or [],
-        language=LanguageInfo(code="en", confidence=0.9),
-        decided_by=Tier.T1_CLASSIFIER,
-        safety=SafetyReport(),
-        usage=RequestUsage(),
-    )
-
-
 # ── Preprocessing ─────────────────────────────────────────────────────────────
 
 
@@ -167,8 +157,7 @@ async def test_redaction_happens_before_any_tier_sees_the_text(settings: Setting
     service = build_service(stub, settings)
 
     response = await service.analyse(
-        SentimentRequest(text="Mail me at alice@example.com about the refund"),
-        resource=ResourceKind.SENTIMENT,
+        ClassifyRequest(text="Mail me at alice@example.com about the refund"),
         request_id="req_1",
         options=Options(),
     )
@@ -185,8 +174,7 @@ async def test_redaction_is_skipped_when_the_caller_opted_out(settings: Settings
     service = build_service(stub, settings)
 
     response = await service.analyse(
-        SentimentRequest(text="Mail me at alice@example.com"),
-        resource=ResourceKind.SENTIMENT,
+        ClassifyRequest(text="Mail me at alice@example.com"),
         request_id="req_1",
         options=Options(redact_pii=False),
     )
@@ -202,10 +190,7 @@ async def test_text_is_capped_at_the_classifier_window(settings: Settings) -> No
 
     original = "great " * 200
     response = await service.analyse(
-        SentimentRequest(text=original),
-        resource=ResourceKind.SENTIMENT,
-        request_id="req_1",
-        options=Options(),
+        ClassifyRequest(text=original), request_id="req_1", options=Options()
     )
 
     assert len(stub.contexts[0].text) <= 64
@@ -213,14 +198,19 @@ async def test_text_is_capped_at_the_classifier_window(settings: Settings) -> No
     assert response.safety.truncated is True
 
 
-async def test_resource_fields_carry_the_review_inputs(settings: Settings) -> None:
-    """The tiers read `rating`/`rating_scale_max` out of `resource_fields`."""
+async def test_resource_fields_carry_every_optional_input(settings: Settings) -> None:
+    """The tiers read the caller's optional fields out of `resource_fields`."""
     stub = StubOrchestrator()
     service = build_service(stub, settings)
 
     await service.analyse(
-        ReviewRequest(text="Sturdy and cheap", rating=4, rating_scale_max=5, title="Good buy"),
-        resource=ResourceKind.REVIEWS,
+        ClassifyRequest(
+            text="Sturdy and cheap",
+            rating=4,
+            rating_scale_max=5,
+            title="Good buy",
+            channel="support",
+        ),
         request_id="req_1",
         options=Options(),
     )
@@ -229,6 +219,7 @@ async def test_resource_fields_carry_the_review_inputs(settings: Settings) -> No
     assert fields["rating"] == 4
     assert fields["rating_scale_max"] == 5
     assert fields["title"] == "Good buy"
+    assert fields["channel"] == "support"
 
 
 async def test_latency_budget_becomes_a_deadline(settings: Settings) -> None:
@@ -236,8 +227,7 @@ async def test_latency_budget_becomes_a_deadline(settings: Settings) -> None:
     service = build_service(stub, settings)
 
     await service.analyse(
-        SentimentRequest(text="fine"),
-        resource=ResourceKind.SENTIMENT,
+        ClassifyRequest(text="fine"),
         request_id="req_1",
         options=Options(latency_budget_ms=500),
     )
@@ -262,8 +252,7 @@ async def test_envelope_reports_every_tier_that_ran(settings: Settings) -> None:
     service = build_service(stub, settings)
 
     response = await service.analyse(
-        SentimentRequest(text="mixed feelings, but mostly good"),
-        resource=ResourceKind.SENTIMENT,
+        ClassifyRequest(text="mixed feelings, but mostly good"),
         request_id="req_9",
         options=Options(),
     )
@@ -276,6 +265,7 @@ async def test_envelope_reports_every_tier_that_ran(settings: Settings) -> None:
     assert response.usage.tokens_out == 24
     assert response.usage.est_cost_usd == pytest.approx(0.002)
     assert response.latency_ms >= 0.0
+    assert response.model.name == "t2_local_llm-v1"
 
 
 async def test_metadata_is_echoed_verbatim(settings: Settings) -> None:
@@ -284,8 +274,7 @@ async def test_metadata_is_echoed_verbatim(settings: Settings) -> None:
     metadata: dict[str, Any] = {"tenant": "acme", "nested": {"a": [1, 2]}, "n": 3}
 
     response = await service.analyse(
-        SentimentRequest(text="all good", metadata=metadata),
-        resource=ResourceKind.SENTIMENT,
+        ClassifyRequest(text="all good", metadata=metadata),
         request_id="req_1",
         options=Options(),
     )
@@ -300,21 +289,16 @@ async def test_trace_is_included_by_default_and_suppressible(settings: Settings)
     ]
     stub = StubOrchestrator(make_result(verdicts=verdicts))
     service = build_service(stub, settings)
-    request = SentimentRequest(text="good enough")
+    request = ClassifyRequest(text="good enough")
 
-    with_trace = await service.analyse(
-        request, resource=ResourceKind.SENTIMENT, request_id="req_1", options=Options()
-    )
+    with_trace = await service.analyse(request, request_id="req_1", options=Options())
     assert [step.tier for step in with_trace.escalation_trace] == [
         Tier.T0_RULES,
         Tier.T1_CLASSIFIER,
     ]
 
     without = await service.analyse(
-        request,
-        resource=ResourceKind.SENTIMENT,
-        request_id="req_2",
-        options=Options(include_trace=False),
+        request, request_id="req_2", options=Options(include_trace=False)
     )
     assert without.escalation_trace == []
     # Suppression is a shaping choice, not a different analysis.
@@ -326,10 +310,7 @@ async def test_degraded_flag_is_carried_through(settings: Settings) -> None:
     service = build_service(stub, settings)
 
     response = await service.analyse(
-        SentimentRequest(text="ok"),
-        resource=ResourceKind.SENTIMENT,
-        request_id="req_1",
-        options=Options(),
+        ClassifyRequest(text="ok"), request_id="req_1", options=Options()
     )
 
     assert response.degraded is True
@@ -341,14 +322,10 @@ async def test_degraded_flag_is_carried_through(settings: Settings) -> None:
 async def test_cache_hit_skips_the_ladder(settings: Settings, memory_cache: MemoryCache) -> None:
     stub = StubOrchestrator()
     service = build_service(stub, settings, memory_cache)
-    request = SentimentRequest(text="the battery lasts for days")
+    request = ClassifyRequest(text="the battery lasts for days")
 
-    first = await service.analyse(
-        request, resource=ResourceKind.SENTIMENT, request_id="req_1", options=Options()
-    )
-    second = await service.analyse(
-        request, resource=ResourceKind.SENTIMENT, request_id="req_2", options=Options()
-    )
+    first = await service.analyse(request, request_id="req_1", options=Options())
+    second = await service.analyse(request, request_id="req_2", options=Options())
 
     assert stub.calls == 1
     assert first.cached is False
@@ -369,14 +346,12 @@ async def test_cache_hit_reshapes_rather_than_replays(
     service = build_service(stub, settings, memory_cache)
 
     await service.analyse(
-        SentimentRequest(text="same text", metadata={"caller": "first"}),
-        resource=ResourceKind.SENTIMENT,
+        ClassifyRequest(text="same text", metadata={"caller": "first"}),
         request_id="req_1",
         options=Options(),
     )
     replayed = await service.analyse(
-        SentimentRequest(text="same text", metadata={"caller": "second"}),
-        resource=ResourceKind.SENTIMENT,
+        ClassifyRequest(text="same text", metadata={"caller": "second"}),
         request_id="req_2",
         options=Options(include_trace=False),
     )
@@ -392,17 +367,10 @@ async def test_options_that_change_the_answer_change_the_key(
 ) -> None:
     stub = StubOrchestrator()
     service = build_service(stub, settings, memory_cache)
-    request = SentimentRequest(text="worth every penny")
+    request = ClassifyRequest(text="worth every penny")
 
-    await service.analyse(
-        request, resource=ResourceKind.SENTIMENT, request_id="req_1", options=Options()
-    )
-    await service.analyse(
-        request,
-        resource=ResourceKind.SENTIMENT,
-        request_id="req_2",
-        options=Options(max_tier=Tier.T1_CLASSIFIER),
-    )
+    await service.analyse(request, request_id="req_1", options=Options())
+    await service.analyse(request, request_id="req_2", options=Options(max_tier=Tier.T1_CLASSIFIER))
 
     assert stub.calls == 2
 
@@ -413,14 +381,10 @@ async def test_degraded_results_are_not_cached(
     """A provider blip must not pin the fallback answer for the whole TTL."""
     stub = StubOrchestrator(make_result(degraded=True))
     service = build_service(stub, settings, memory_cache)
-    request = SentimentRequest(text="cannot fault it")
+    request = ClassifyRequest(text="cannot fault it")
 
-    await service.analyse(
-        request, resource=ResourceKind.SENTIMENT, request_id="req_1", options=Options()
-    )
-    await service.analyse(
-        request, resource=ResourceKind.SENTIMENT, request_id="req_2", options=Options()
-    )
+    await service.analyse(request, request_id="req_1", options=Options())
+    await service.analyse(request, request_id="req_2", options=Options())
 
     assert stub.calls == 2
 
@@ -428,15 +392,10 @@ async def test_degraded_results_are_not_cached(
 async def test_no_cache_backend_is_a_supported_shape(settings: Settings) -> None:
     stub = StubOrchestrator()
     service = build_service(stub, settings, None)
-    request = SentimentRequest(text="no cache here")
+    request = ClassifyRequest(text="no cache here")
 
     for index in range(2):
-        result = await service.analyse(
-            request,
-            resource=ResourceKind.SENTIMENT,
-            request_id=f"req_{index}",
-            options=Options(),
-        )
+        result = await service.analyse(request, request_id=f"req_{index}", options=Options())
         assert result.cached is False
     assert stub.calls == 2
 
@@ -451,13 +410,12 @@ async def test_batch_isolates_one_bad_item(settings: Settings) -> None:
 
     items = await service.analyse_batch(
         [
-            SentimentRequest(text="first is fine"),
-            SentimentRequest(text="second goes boom"),
-            SentimentRequest(text="third is fine"),
+            ClassifyRequest(text="first is fine"),
+            ClassifyRequest(text="second goes boom"),
+            ClassifyRequest(text="third is fine"),
         ],
-        resource=ResourceKind.SENTIMENT,
         request_id="req_batch",
-        instance="/v1/sentiment/batch",
+        instance="/v1/classify/batch",
     )
 
     assert [item.index for item in items] == [0, 1, 2]
@@ -469,7 +427,7 @@ async def test_batch_isolates_one_bad_item(settings: Settings) -> None:
     assert problem is not None
     assert problem.status == 503
     assert problem.type.endswith("/no-verdict")
-    assert problem.instance == "/v1/sentiment/batch"
+    assert problem.instance == "/v1/classify/batch"
     assert problem.request_id == "req_batch"
     assert items[1].result is None
 
@@ -478,11 +436,7 @@ async def test_batch_hides_unexpected_failures_behind_a_500(settings: Settings) 
     stub = StubOrchestrator(fail_on="boom", error=RuntimeError("psycopg2://user:pw@host"))
     service = build_service(stub, settings)
 
-    items = await service.analyse_batch(
-        [SentimentRequest(text="boom")],
-        resource=ResourceKind.SENTIMENT,
-        request_id="req_batch",
-    )
+    items = await service.analyse_batch([ClassifyRequest(text="boom")], request_id="req_batch")
 
     problem = items[0].error
     assert problem is not None
@@ -513,8 +467,7 @@ async def test_batch_lets_an_exception_render_its_own_problem(settings: Settings
     service = build_service(stub, settings)
 
     items = await service.analyse_batch(
-        [SentimentRequest(text="anything")],
-        resource=ResourceKind.SENTIMENT,
+        [ClassifyRequest(text="anything")],
         request_id="req_batch",
         clamp=refuse,
     )
@@ -532,8 +485,7 @@ async def test_batch_concurrency_is_bounded(settings: Settings) -> None:
     service = build_service(stub, bounded)
 
     items = await service.analyse_batch(
-        [SentimentRequest(text=f"item number {i}") for i in range(12)],
-        resource=ResourceKind.SENTIMENT,
+        [ClassifyRequest(text=f"item number {i}") for i in range(12)],
         request_id="req_batch",
     )
 
@@ -548,10 +500,9 @@ async def test_batch_item_options_beat_the_batch_default(settings: Settings) -> 
 
     await service.analyse_batch(
         [
-            SentimentRequest(text="takes the default"),
-            SentimentRequest(text="brings its own", options=Options(max_tier=Tier.T0_RULES)),
+            ClassifyRequest(text="takes the default"),
+            ClassifyRequest(text="brings its own", options=Options(max_tier=Tier.T0_RULES)),
         ],
-        resource=ResourceKind.SENTIMENT,
         request_id="req_batch",
         options=Options(max_tier=Tier.T2_LOCAL_LLM),
     )
@@ -570,8 +521,7 @@ async def test_batch_clamp_applies_to_item_options(settings: Settings) -> None:
         return options.model_copy(update={"max_tier": Tier.T1_CLASSIFIER})
 
     await service.analyse_batch(
-        [SentimentRequest(text="reach for the cloud", options=Options(max_tier=Tier.T3_CLOUD_LLM))],
-        resource=ResourceKind.SENTIMENT,
+        [ClassifyRequest(text="reach for the cloud", options=Options(max_tier=Tier.T3_CLOUD_LLM))],
         request_id="req_batch",
         clamp=ceiling,
     )
@@ -579,13 +529,13 @@ async def test_batch_clamp_applies_to_item_options(settings: Settings) -> None:
     assert stub.contexts[0].options.max_tier is Tier.T1_CLASSIFIER
 
 
-async def test_batch_returns_the_resources_own_response_type(settings: Settings) -> None:
+async def test_batch_item_carries_rating_consistency_when_rated(settings: Settings) -> None:
+    """A batch is not secretly sentiment-only: a rated item gets the full shape."""
     stub = StubOrchestrator()
     service = build_service(stub, settings)
 
     items = await service.analyse_batch(
-        [ReviewRequest(text="Solid build", rating=5, rating_scale_max=5)],
-        resource=ResourceKind.REVIEWS,
+        [ClassifyRequest(text="Solid build", rating=5, rating_scale_max=5)],
         request_id="req_batch",
     )
 
@@ -594,25 +544,24 @@ async def test_batch_returns_the_resources_own_response_type(settings: Settings)
     assert result.rating_consistency is not None
 
 
-# ── Feedback shaping ──────────────────────────────────────────────────────────
+# ── Triage fields (formerly /feedback's) ──────────────────────────────────────
 
 
-async def test_feedback_response_carries_derived_triage(settings: Settings) -> None:
+async def test_channel_reaches_the_response_via_urgency(settings: Settings) -> None:
     stub = StubOrchestrator(
         make_result(verdicts=[make_verdict(label=Label.NEGATIVE, polarity=-0.8)])
     )
     service = build_service(stub, settings)
 
     response = await service.analyse(
-        FeedbackRequest(text="Total outage, none of our team can log in", channel="support"),
-        resource=ResourceKind.FEEDBACK,
+        ClassifyRequest(text="Total outage, none of our team can log in", channel="support"),
         request_id="req_1",
         options=Options(),
     )
 
-    assert response.urgency is Urgency.CRITICAL
+    assert response.urgency.label is Urgency.CRITICAL
     assert response.actionability is Actionability.BLOCKING
-    assert response.suggested_route == "reliability"
+    assert response.routing.queue == "reliability"
 
 
 @pytest.mark.parametrize(
@@ -653,13 +602,21 @@ def test_cue_matching_respects_word_boundaries() -> None:
 
 
 def test_actionability_grades_praise_and_silence_apart() -> None:
-    praise = envelope(sentiment=SentimentResult(label=Label.POSITIVE, polarity=0.9, confidence=0.9))
-    shaped = _shape_feedback(praise, text="Genuinely delightful", channel=None)
-    assert shaped.actionability is Actionability.INFORMATIONAL
+    praise = SentimentResult(label=Label.POSITIVE, polarity=0.9, confidence=0.9)
+    assert (
+        _derive_actionability(
+            sentiment=praise, text="Genuinely delightful", urgency=Urgency.LOW, aspects=[]
+        )
+        is Actionability.INFORMATIONAL
+    )
 
-    neutral = envelope(sentiment=SentimentResult(label=Label.NEUTRAL, polarity=0.0, confidence=0.6))
-    quiet = _shape_feedback(neutral, text="Received the newsletter", channel=None)
-    assert quiet.actionability is Actionability.NONE
+    neutral = SentimentResult(label=Label.NEUTRAL, polarity=0.0, confidence=0.6)
+    assert (
+        _derive_actionability(
+            sentiment=neutral, text="Received the newsletter", urgency=Urgency.LOW, aspects=[]
+        )
+        is Actionability.NONE
+    )
 
 
 @pytest.mark.parametrize(
@@ -681,62 +638,56 @@ def test_route_derivation_reads_aspect_names_too() -> None:
     assert _derive_route(text="Took forever to turn up", aspects=aspects) == "shipping"
 
 
-# ── Review shaping ────────────────────────────────────────────────────────────
+# ── Rating consistency (formerly /reviews') ───────────────────────────────────
 
 
 def test_rating_consistency_agrees() -> None:
-    base = envelope(sentiment=SentimentResult(label=Label.POSITIVE, polarity=0.9, confidence=0.9))
-    shaped = _shape_review(base, rating=5, rating_scale_max=5)
+    consistency = _rating_consistency(rating=5, rating_scale_max=5, polarity=0.9)
 
-    assert shaped.rating_consistency is not None
-    assert shaped.rating_consistency.agreement is RatingAgreement.AGREES
-    assert shaped.rating_consistency.normalised_rating == pytest.approx(1.0)
-    assert shaped.rating_consistency.delta == pytest.approx(-0.1)
+    assert consistency is not None
+    assert consistency.agreement is RatingAgreement.AGREES
+    assert consistency.normalised_rating == pytest.approx(1.0)
+    assert consistency.delta == pytest.approx(-0.1)
 
 
 def test_rating_consistency_prose_more_positive() -> None:
-    base = envelope(sentiment=SentimentResult(label=Label.POSITIVE, polarity=0.8, confidence=0.9))
-    shaped = _shape_review(base, rating=2, rating_scale_max=5)
+    consistency = _rating_consistency(rating=2, rating_scale_max=5, polarity=0.8)
 
-    assert shaped.rating_consistency is not None
-    assert shaped.rating_consistency.agreement is RatingAgreement.PROSE_MORE_POSITIVE
-    assert shaped.rating_consistency.normalised_rating == pytest.approx(-0.2)
-    assert shaped.rating_consistency.delta == pytest.approx(1.0)
+    assert consistency is not None
+    assert consistency.agreement is RatingAgreement.PROSE_MORE_POSITIVE
+    assert consistency.normalised_rating == pytest.approx(-0.2)
+    assert consistency.delta == pytest.approx(1.0)
 
 
 def test_rating_consistency_prose_more_negative() -> None:
     """Five stars and a scathing paragraph — a mis-click, or sarcasm."""
-    base = envelope(sentiment=SentimentResult(label=Label.NEGATIVE, polarity=-0.3, confidence=0.9))
-    shaped = _shape_review(base, rating=5, rating_scale_max=5)
+    consistency = _rating_consistency(rating=5, rating_scale_max=5, polarity=-0.3)
 
-    assert shaped.rating_consistency is not None
-    assert shaped.rating_consistency.agreement is RatingAgreement.PROSE_MORE_NEGATIVE
-    assert shaped.rating_consistency.delta == pytest.approx(-1.3)
+    assert consistency is not None
+    assert consistency.agreement is RatingAgreement.PROSE_MORE_NEGATIVE
+    assert consistency.delta == pytest.approx(-1.3)
 
 
 def test_rating_consistency_is_null_without_a_rating() -> None:
-    shaped = _shape_review(envelope(), rating=None, rating_scale_max=5)
-    assert shaped.rating_consistency is None
+    assert _rating_consistency(rating=None, rating_scale_max=5, polarity=0.5) is None
 
 
 def test_rating_consistency_handles_a_non_five_scale() -> None:
-    base = envelope(sentiment=SentimentResult(label=Label.POSITIVE, polarity=0.5, confidence=0.9))
-    shaped = _shape_review(base, rating=75, rating_scale_max=100)
+    consistency = _rating_consistency(rating=75, rating_scale_max=100, polarity=0.5)
 
-    assert shaped.rating_consistency is not None
-    assert shaped.rating_consistency.normalised_rating == pytest.approx(0.5)
-    assert shaped.rating_consistency.agreement is RatingAgreement.AGREES
+    assert consistency is not None
+    assert consistency.normalised_rating == pytest.approx(0.5)
+    assert consistency.agreement is RatingAgreement.AGREES
 
 
-async def test_review_rating_reaches_the_shaper_from_the_request(settings: Settings) -> None:
+async def test_review_rating_reaches_the_response_from_the_request(settings: Settings) -> None:
     stub = StubOrchestrator(
         make_result(verdicts=[make_verdict(label=Label.NEGATIVE, polarity=-0.6)])
     )
     service = build_service(stub, settings)
 
     response = await service.analyse(
-        ReviewRequest(text="Broke after a week", rating=5, rating_scale_max=5),
-        resource=ResourceKind.REVIEWS,
+        ClassifyRequest(text="Broke after a week", rating=5, rating_scale_max=5),
         request_id="req_1",
         options=Options(),
     )
@@ -745,14 +696,119 @@ async def test_review_rating_reaches_the_shaper_from_the_request(settings: Setti
     assert response.rating_consistency.agreement is RatingAgreement.PROSE_MORE_NEGATIVE
 
 
-# ── Sentiment shaping ─────────────────────────────────────────────────────────
+# ── Routing and requires_human ────────────────────────────────────────────────
 
 
-def test_sentiment_shaper_is_the_envelope_unchanged() -> None:
-    base = envelope(aspects=[Aspect(name="battery", label=Label.POSITIVE, confidence=0.7)])
-    shaped = _shape_sentiment(base)
+def test_routing_prefers_intent_over_topics_over_keywords() -> None:
+    """The three fallback rungs `_derive_routing` climbs, cheapest evidence last."""
+    intent = LabeledScore(label=Intent.REFUND_REQUEST, confidence=0.9)
+    topics = [LabeledScore(label=Topic.DELIVERY, confidence=0.9)]
 
-    assert shaped.model_dump() == base.model_dump()
+    # intent wins even though a topic also matched.
+    routing = _derive_routing(
+        text="", aspects=[], intent=intent, topics=topics, urgency=Urgency.LOW
+    )
+    assert routing.queue == "billing"
+
+    # no intent: falls back to the highest-confidence topic.
+    routing = _derive_routing(text="", aspects=[], intent=None, topics=topics, urgency=Urgency.LOW)
+    assert routing.queue == "shipping"
+
+    # neither: falls back to the keyword match.
+    routing = _derive_routing(
+        text="Someone got into my account, my password leaked",
+        aspects=[],
+        intent=None,
+        topics=[],
+        urgency=Urgency.LOW,
+    )
+    assert routing.queue == "security"
+
+
+def test_routing_priority_is_a_direct_rank_mapping_of_urgency() -> None:
+    for urgency, priority in (
+        (Urgency.CRITICAL, RoutingPriority.P1),
+        (Urgency.HIGH, RoutingPriority.P2),
+        (Urgency.MEDIUM, RoutingPriority.P3),
+        (Urgency.LOW, RoutingPriority.P4),
+    ):
+        routing = _derive_routing(text="", aspects=[], intent=None, topics=[], urgency=urgency)
+        assert routing.priority is priority
+
+
+@pytest.mark.parametrize(
+    ("urgency", "intent", "tone", "expected"),
+    [
+        (Urgency.CRITICAL, None, None, True),
+        (Urgency.HIGH, None, None, True),
+        (Urgency.LOW, Intent.REFUND_REQUEST, None, True),
+        (Urgency.LOW, Intent.PRAISE, None, False),
+        (Urgency.LOW, None, Tone.ANGRY, True),
+        (Urgency.LOW, None, Tone.APPRECIATIVE, False),
+        (Urgency.MEDIUM, None, None, False),
+    ],
+)
+def test_requires_human_derivation(
+    urgency: Urgency, intent: Intent | None, tone: Tone | None, expected: bool
+) -> None:
+    assert _derive_requires_human(urgency=urgency, intent=intent, tone=tone) is expected
+
+
+# ── LLM-only fields ────────────────────────────────────────────────────────────
+
+
+async def test_llm_only_fields_are_absent_when_a_low_rung_decided(settings: Settings) -> None:
+    """T0/T1 cannot produce tone/topics/intent — the response says so honestly
+    rather than inventing a value, while urgency/routing/requires_human/
+    actionability (all heuristic) are still fully populated."""
+    stub = StubOrchestrator(
+        make_result(verdicts=[make_verdict(tier=Tier.T1_CLASSIFIER, label=Label.NEGATIVE)])
+    )
+    service = build_service(stub, settings)
+
+    response = await service.analyse(
+        ClassifyRequest(text="Somewhat disappointing, could be better"),
+        request_id="req_1",
+        options=Options(),
+    )
+
+    assert response.tone is None
+    assert response.intent is None
+    assert response.topics == []
+    assert response.urgency is not None
+    assert response.routing is not None
+    assert isinstance(response.requires_human, bool)
+    assert response.actionability is not None
+    assert response.model.name == "t1_classifier-v1"
+
+
+async def test_llm_populated_fields_pass_straight_through(settings: Settings) -> None:
+    """When an LLM tier decided and filled tone/topics/intent, they pass straight
+    through — and routing prefers them over the keyword fallback."""
+    verdict = make_verdict(
+        tier=Tier.T3_CLOUD_LLM,
+        label=Label.NEGATIVE,
+        polarity=-0.8,
+        tone=LabeledScore(label=Tone.FRUSTRATED, confidence=0.85),
+        topics=[LabeledScore(label=Topic.PRODUCT_QUALITY, confidence=0.9)],
+        intent=LabeledScore(label=Intent.COMPLAINT, confidence=0.88),
+    )
+    stub = StubOrchestrator(make_result(verdicts=[verdict]))
+    service = build_service(stub, settings)
+
+    response = await service.analyse(
+        ClassifyRequest(text="This broke after one use, I'm frustrated"),
+        request_id="req_1",
+        options=Options(),
+    )
+
+    assert response.tone is not None
+    assert response.tone.label is Tone.FRUSTRATED
+    assert response.intent is not None
+    assert response.intent.label is Intent.COMPLAINT
+    assert [t.label for t in response.topics] == [Topic.PRODUCT_QUALITY]
+    assert response.routing.queue == "customer_support"  # from intent=COMPLAINT
+    assert response.decided_by is Tier.T3_CLOUD_LLM
 
 
 async def test_no_verdict_propagates_from_a_single_call(settings: Settings) -> None:
@@ -762,8 +818,5 @@ async def test_no_verdict_propagates_from_a_single_call(settings: Settings) -> N
 
     with pytest.raises(NoVerdictError):
         await service.analyse(
-            SentimentRequest(text="anything at all"),
-            resource=ResourceKind.SENTIMENT,
-            request_id="req_1",
-            options=Options(),
+            ClassifyRequest(text="anything at all"), request_id="req_1", options=Options()
         )

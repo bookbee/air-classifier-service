@@ -8,35 +8,18 @@ COMPOSE ?= docker compose
 IMAGE   ?= air-classifier
 TAG     ?= dev
 HOST    ?= 127.0.0.1
-# 8082 in the AIR port map: 8080 is air-infra's gateway, 8081 is air-platform.
+# 8082 in the AIR port map: 8080 is air-infra, 8081 is air-platform, 8083 is
+# air-llm — every model call this service makes goes there.
 PORT    ?= 8082
 
 SERVE_LOG ?= .run/service.log
 
-# The network air-infra publishes. Shared dependencies (redis, ollama,
-# prometheus, grafana) live there, not here.
+# The network air-infra publishes. Redis and Prometheus live there, not here.
+# Model access (Tier 2 and Tier 3 both) is air-llm's, reached over the host —
+# see docker-compose.yml — never through this network.
 NETWORK ?= air-net
 INFRA_DIR ?= ../air-infra
-
-# ---- ollama backend (compose only) -----------------------------------------
-# container | native. Mirrors air-infra's switch of the same name and must agree
-# with it: `native` means the laptop's own `ollama serve`, which on macOS is the
-# only one with GPU access — Docker Desktop has no Metal passthrough.
-#
-# Only affects `make up`. The native inner loop (`make run` / `make start`)
-# reads PROVIDERS__OLLAMA__BASE_URL from .env, where localhost:11434 addresses
-# whichever instance is serving.
-OLLAMA ?= container
-
-ifeq ($(OLLAMA),container)
-OLLAMA_URL := http://ollama:11434
-else ifeq ($(OLLAMA),native)
-OLLAMA_URL := http://host.docker.internal:11434
-else
-$(error OLLAMA must be `container` or `native`, got `$(OLLAMA)`)
-endif
-
-export AIR_CLASSIFIER_OLLAMA_URL := $(OLLAMA_URL)
+AIR_LLM_DIR ?= ../air-llm
 
 # The listening server, and only it. `lsof -ti tcp:$(PORT)` on its own also
 # matches every client *connected* to that port — a browser tab, air-client,
@@ -102,7 +85,7 @@ test: ## Run the whole suite
 test-unit: ## Run only tests that need no external service
 	$(PYTEST) tests/unit -m "not integration and not live"
 
-test-integration: ## Run tests that need redis/ollama (see `make up`)
+test-integration: ## Run the multi-component wiring suite (tests/integration/, no external services)
 	$(PYTEST) tests/integration -m integration
 
 lint: ## Ruff lint + format check
@@ -129,28 +112,28 @@ image: ## Build the runtime image
 infra-check: ## Fail early if air-infra's shared stack is not up
 	@docker network inspect $(NETWORK) >/dev/null 2>&1 || { \
 		echo "air-infra is not up: network '$(NETWORK)' does not exist."; \
-		echo "Shared dependencies (redis, ollama, prometheus, grafana) live there."; \
+		echo "Redis and Prometheus live there."; \
 		echo; \
 		echo "    cd $(INFRA_DIR) && make up"; \
 		echo; \
 		exit 1; }
 
-up: infra-check ## Start this service as a container, against air-infra's stack
+up: infra-check ## Start this service as a container, against air-infra + air-llm
 	$(COMPOSE) up -d --build
 	@echo
-	@echo "api     http://$(HOST):$(PORT)/v1/health"
-	@echo "ollama  $(OLLAMA) at $(OLLAMA_URL)"
-	@echo "metrics scraped by air-infra's prometheus (make up-observability there)"
+	@echo "api      http://$(HOST):$(PORT)/v1/health"
+	@echo "air-llm  http://host.docker.internal:8083 (cd $(AIR_LLM_DIR) && make up if it is not)"
+	@echo "metrics  scraped by air-infra's prometheus (make up-observability there)"
 
-down: ## Stop this service. Shared dependencies keep running in air-infra.
+down: ## Stop this service. Shared dependencies keep running in air-infra/air-llm.
 	$(COMPOSE) down --remove-orphans
 
 logs: ## Tail the app's logs
 	$(COMPOSE) logs -f --tail=100 air-classifier
 
-doctor: ## Check this service's dependencies are reachable, in whichever mode
-	@OLLAMA=$(OLLAMA) OLLAMA_URL=$(OLLAMA_URL) NETWORK=$(NETWORK) \
-		INFRA_DIR=$(INFRA_DIR) HOST=$(HOST) PORT=$(PORT) bash scripts/doctor.sh
+doctor: ## Check this service's dependencies are reachable
+	@NETWORK=$(NETWORK) INFRA_DIR=$(INFRA_DIR) AIR_LLM_DIR=$(AIR_LLM_DIR) \
+		HOST=$(HOST) PORT=$(PORT) bash scripts/doctor.sh
 
 clean: ## Remove build and tool caches (leaves .venv alone)
 	rm -rf build dist .coverage coverage.xml htmlcov

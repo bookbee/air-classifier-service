@@ -1,11 +1,7 @@
 """Tier 3 — the metered cloud rung, and the last one.
 
 Everything below this tier is cheap enough to run speculatively; this one is
-not, which shapes all three of its behaviours.
-
-**Selection happens before the call.** The registry consults breaker state and
-cached health first, so an outage moves traffic wholesale instead of charging
-every request one failed attempt.
+not, which shapes both of its behaviours.
 
 **Arbitration is a second opinion, not a retry.** When the fast model comes back
 under ``arbitration_floor`` it is telling us it does not know, and the honest
@@ -13,10 +9,16 @@ response to that is a stronger model rather than the same one again. It happens
 at most once — there is no loop here — and both calls' tokens and cost are
 counted, because a spend ceiling that only saw the second call would be a lie.
 
-**Failure degrades, it never propagates.** A refusal, an open breaker, or no
-provider at all becomes a :class:`TierError`, which the orchestrator turns into a
-failed verdict and a lower rung's answer. There is no path from this module to a
-5xx.
+**Failure degrades, it never propagates.** A refusal, an open breaker, or air-llm
+being unreachable becomes a :class:`TierError`, which the orchestrator turns
+into a failed verdict and a lower rung's answer. There is no path from this
+module to a 5xx.
+
+This rung no longer selects *among* cloud providers — that failover is air-llm's
+job now, expressed as a routing alias (``config.py``'s ``AirLlmSettings.
+cloud_model``/``arbiter_model``), not a ``ProviderRegistry`` here. What is still
+this rung's job: deciding *whether* the fast model's answer was good enough, and
+asking for a second, stronger opinion when it was not.
 """
 
 from __future__ import annotations
@@ -24,8 +26,8 @@ from __future__ import annotations
 import time
 from typing import Final
 
-from air_classifier.config import Settings
-from air_classifier.constants import Provider, Tier
+from air_classifier.config import AirLlmSettings, Settings
+from air_classifier.constants import Tier
 from air_classifier.observability.logging import get_logger
 from air_classifier.observability.metrics import record_llm_usage
 from air_classifier.observability.tracing import span
@@ -42,12 +44,7 @@ from air_classifier.providers.prompts.loader import (
     system_prompt,
     user_content,
 )
-from air_classifier.providers.registry import (
-    CloudProviderSettings,
-    NoProviderAvailableError,
-    ProviderRegistry,
-)
-from air_classifier.resilience.breaker import CircuitOpenError
+from air_classifier.resilience.breaker import CircuitBreaker, CircuitOpenError
 from air_classifier.resilience.bulkhead import Bulkhead, BulkheadFullError
 from air_classifier.resilience.guard import guarded
 from air_classifier.schemas.common import TierUsage
@@ -69,21 +66,40 @@ class CloudLLMTier:
     def __init__(
         self,
         settings: Settings,
-        registry: ProviderRegistry,
+        provider: LLMProvider,
+        *,
         bulkhead: Bulkhead | None = None,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         self._settings = settings
-        self._registry = registry
-        self._bulkhead = bulkhead
+        self._provider = provider
+        self._config: AirLlmSettings = settings.air_llm
         self._tier_settings = settings.tiers.for_tier(self.tier)
-        self.model_version = _default_model_version(settings)
+        dependency = provider.name.value
+        self._bulkhead = bulkhead or Bulkhead.from_settings(dependency, settings.resilience)
+        self._breaker = breaker or CircuitBreaker.from_settings(dependency, settings.resilience)
+        self.model_version = self._config.cloud_model
 
     async def is_available(self) -> bool:
+        if not self._provider.configured or not self._breaker.is_closed:
+            return False
         try:
-            return await self._registry.available()
+            return await self._provider.health()
         except Exception as exc:
             logger.warning("t3.availability_probe_failed", error=type(exc).__name__)
             return False
+
+    async def unavailable_reason(self) -> str | None:
+        """Same order `is_available` checks in, so the two cannot disagree
+        about *which* condition is the one actually blocking this rung."""
+        if not self._provider.configured:
+            # `configured` is an air-llm-level check (AIR_LLM__ENABLED /
+            # AIR_LLM__TOKEN), not per-vendor — naming the breaker label here
+            # would send an operator looking for a knob that does not exist.
+            return "air-llm not configured"
+        if not self._breaker.is_closed:
+            return f"circuit breaker open for {self._provider.name.value} — retries after cooldown"
+        return self._provider.health_detail
 
     def supports_language(self, code: str) -> bool:
         """Every language, which is a large part of why this rung exists.
@@ -97,26 +113,16 @@ class CloudLLMTier:
         if ctx.budget_exhausted:
             raise TierUnavailableError("latency budget exhausted before the cloud call")
 
-        try:
-            provider, model = await self._registry.select(ctx)
-        except NoProviderAvailableError as exc:
-            raise TierUnavailableError(str(exc)) from exc
-
-        config = self._registry.config_for(provider.name)
         started = time.perf_counter()
-
-        async with span("tier.t3_cloud_llm", provider=provider.name.value, model=model):
+        async with span("tier.t3_cloud_llm", model=self._config.cloud_model):
             primary = await self._call(
-                provider,
                 ctx,
-                model=model,
-                max_tokens=config.max_tokens,
+                model=self._config.cloud_model,
+                max_tokens=self._config.max_tokens,
                 user_text=user_content(ctx),
             )
             output = _output_of(primary)
-            final, usage = await self._arbitrate(
-                provider, ctx, config, primary=primary, output=output
-            )
+            final, usage = await self._arbitrate(ctx, primary=primary, output=output)
 
         if final is not primary:
             output = _output_of(final)
@@ -133,9 +139,7 @@ class CloudLLMTier:
 
     async def _arbitrate(
         self,
-        provider: LLMProvider,
         ctx: TierContext,
-        config: CloudProviderSettings,
         *,
         primary: ProviderResult,
         output: LLMSentimentOutput,
@@ -146,7 +150,7 @@ class CloudLLMTier:
         the cost ceiling sees the true spend rather than the winning half of it.
         """
         usage = primary.to_usage()
-        if not self._should_arbitrate(ctx, config, primary=primary, output=output):
+        if not self._should_arbitrate(ctx, primary=primary, output=output):
             return primary, usage
 
         # The arbiter is shown what the fast model concluded, threaded through
@@ -163,10 +167,9 @@ class CloudLLMTier:
 
         try:
             arbiter = await self._call(
-                provider,
                 hinted,
-                model=config.arbiter_model,
-                max_tokens=config.arbiter_max_tokens,
+                model=self._config.arbiter_model,
+                max_tokens=self._config.arbiter_max_tokens,
                 user_text=user_content(hinted),
             )
         except TierError as exc:
@@ -175,7 +178,7 @@ class CloudLLMTier:
             # rung that knows less.
             logger.warning(
                 "t3.arbitration_failed",
-                arbiter_model=config.arbiter_model,
+                arbiter_model=self._config.arbiter_model,
                 error=type(exc).__name__,
             )
             return primary, usage
@@ -192,11 +195,11 @@ class CloudLLMTier:
     def _should_arbitrate(
         self,
         ctx: TierContext,
-        config: CloudProviderSettings,
         *,
         primary: ProviderResult,
         output: LLMSentimentOutput,
     ) -> bool:
+        config = self._config
         if not config.arbitration_enabled or output.confidence >= config.arbitration_floor:
             return False
         if ctx.budget_exhausted:
@@ -216,7 +219,6 @@ class CloudLLMTier:
 
     async def _call(
         self,
-        provider: LLMProvider,
         ctx: TierContext,
         *,
         model: str,
@@ -226,13 +228,13 @@ class CloudLLMTier:
         """One logical call, with a single bounded repair retry on a bad parse.
 
         Only a schema failure is retried, and only once. A transport failure is
-        the SDK's own retry budget to spend, and a second bad parse is a model
+        air-llm's own retry budget to spend, and a second bad parse is a model
         that cannot follow the schema today — looping on it burns the latency
         budget to arrive at the same escalation.
         """
         try:
             return await self._guarded_call(
-                provider, ctx, model=model, max_tokens=max_tokens, user_text=user_text
+                ctx, model=model, max_tokens=max_tokens, user_text=user_text
             )
         except ProviderSchemaError as exc:
             # The validation detail quotes the model's own output back, which is
@@ -243,7 +245,6 @@ class CloudLLMTier:
 
         try:
             return await self._guarded_call(
-                provider,
                 ctx,
                 model=model,
                 max_tokens=max_tokens,
@@ -254,7 +255,6 @@ class CloudLLMTier:
 
     async def _guarded_call(
         self,
-        provider: LLMProvider,
         ctx: TierContext,
         *,
         model: str,
@@ -263,9 +263,9 @@ class CloudLLMTier:
     ) -> ProviderResult:
         try:
             result = await guarded(
-                provider.classify,
+                self._provider.classify,
                 timeout_s=self._timeout_s(ctx),
-                breaker=self._registry.breaker_for(provider.name),
+                breaker=self._breaker,
                 bulkhead=self._bulkhead,
                 system_prompt=system_prompt(),
                 user_content=user_text,
@@ -279,15 +279,13 @@ class CloudLLMTier:
         except ProviderSchemaError:
             raise
         except CircuitOpenError as exc:
-            self._registry.invalidate_health(provider.name)
             raise TierUnavailableError(str(exc)) from exc
         except BulkheadFullError as exc:
             raise TierUnavailableError(str(exc)) from exc
         except ProviderError as exc:
-            self._registry.invalidate_health(provider.name)
             raise TierError(f"cloud provider failed: {type(exc).__name__}: {exc}") from exc
 
-        _record(provider.name, result)
+        _record(result)
         return result
 
     def _timeout_s(self, ctx: TierContext) -> float:
@@ -311,9 +309,11 @@ def _output_of(result: ProviderResult) -> LLMSentimentOutput:
     return parsed
 
 
-def _record(provider: Provider, result: ProviderResult) -> None:
+def _record(result: ProviderResult) -> None:
+    # `result.provider` is who actually answered, which may differ from this
+    # tier's own provider label when air-llm's alias failed over vendors.
     record_llm_usage(
-        provider,
+        result.provider,
         result.model,
         tokens_in=result.tokens_in,
         tokens_out=result.tokens_out,
@@ -321,18 +321,3 @@ def _record(provider: Provider, result: ProviderResult) -> None:
         cache_write=result.cache_write_tokens,
         cost_usd=result.cost_usd,
     )
-
-
-def _default_model_version(settings: Settings) -> str:
-    """What ``/v1/capabilities`` reports for this rung.
-
-    The head of the preference order rather than whichever provider served the
-    last request: this describes the configuration, while a verdict's own
-    ``model_version`` records the model that actually answered.
-    """
-    for name in settings.providers.preference:
-        if name is Provider.ANTHROPIC:
-            return f"{name.value}:{settings.providers.anthropic.model}"
-        if name is Provider.OPENAI:
-            return f"{name.value}:{settings.providers.openai.model}"
-    return "cloud:unconfigured"

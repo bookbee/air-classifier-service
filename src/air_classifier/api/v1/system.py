@@ -1,20 +1,26 @@
 """Operational endpoints: liveness, readiness, capabilities, and the metrics scrape.
 
-These four are the only routes an operator, a kubelet or a Prometheus scraper
-ever touches, and each answers a different question:
+These four are the routes an operator, a kubelet or a Prometheus scraper
+touches, and each answers a different question:
 
 * ``/v1/health`` — *is this process alive?* Nothing else. It deliberately holds
   no dependency on tiers, cache, or providers, because a liveness probe that
   fails on a downstream outage gets the pod restarted during somebody else's
   incident — turning a partial degradation into a rolling restart storm.
+  Unauthenticated: a kubelet carries no credential.
 * ``/v1/ready`` — *should this pod receive traffic?* It probes what it depends
   on, but grades the result on the ladder's own terms: an upper rung being down
   is ``degraded``, not ``not_ready``, because the whole point of the escalation
   ladder is that a lower rung still answers. Only "no tier at all can serve"
-  justifies pulling the pod out of rotation.
+  justifies pulling the pod out of rotation. Unauthenticated, for the same
+  reason as ``/v1/health``.
 * ``/v1/capabilities`` — *what is this deployment actually capable of right now?*
   Notably which Tier-1 scorer backend is live, since a missing ONNX artifact
   degrades answer quality silently and is otherwise invisible from outside.
+  Unlike its two siblings above, this is operator detail rather than a
+  load-balancer boolean — it discloses configured model/alias names and
+  per-tier availability — so it is authenticated and rate-limited exactly like
+  ``/v1/classify``, not open the way a liveness probe has to be.
 * ``/metrics`` — the Prometheus exposition, mounted outside ``/v1`` and outside
   auth.
 
@@ -37,6 +43,7 @@ from typing import Any, Final, cast
 from fastapi import APIRouter, Depends, Request, Response, status
 
 from air_classifier import __version__
+from air_classifier.api.deps import RateLimitedKeyDep
 from air_classifier.cache.base import CacheBackend
 from air_classifier.config import Settings, get_settings
 from air_classifier.constants import Tier as TierId
@@ -44,8 +51,9 @@ from air_classifier.observability import metrics
 from air_classifier.observability.logging import get_logger
 from air_classifier.pipeline.tiers.base import Tier as TierProtocol
 from air_classifier.pipeline.tiers.scorers import LEXICON_SCORER_NAME
+from air_classifier.schemas.classify import MAX_TEXT_CHARS
 from air_classifier.schemas.common import CapabilitiesResponse, TierCapability
-from air_classifier.schemas.requests import MAX_TEXT_CHARS
+from air_classifier.schemas.errors import ProblemDetail
 from air_classifier.schemas.responses import HealthResponse, ReadyComponent, ReadyResponse
 
 __all__ = [
@@ -87,7 +95,18 @@ STATUS_NOT_READY: Final[str] = "not_ready"
 #: outlive the kubelet's own `timeoutSeconds` reports "unhealthy" by timing out
 #: instead of by answering, which loses the degraded/not-ready distinction this
 #: endpoint exists to draw. Set the kubelet timeout comfortably above this.
-_PROBE_TIMEOUT_S: Final[float] = 1.0
+#:
+#: 1.0s until the air-llm cutover, when it was still sized for T2/T3's own
+#: direct-SDK or same-host provider calls. Reaching air-llm over
+#: `host.docker.internal` (docker-compose.yml) is a real extra hop, not a
+#: same-process call, and measured 1.2-1.5s round trip on Docker Desktop —
+#: the *network*, not air-llm being slow or unhealthy. The old ceiling made
+#: T2/T3 report `available: false` on a perfectly healthy deployment; this one
+#: clears the measured max with the same ~2x-headroom margin every other
+#: measured timeout in this service uses (docs/02-lld.md's changelog), and
+#: comfortably exceeds AirLlmProvider's own `_HEALTH_TIMEOUT_S` (2.0s) so that
+#: timeout gets to be the one that actually fires.
+_PROBE_TIMEOUT_S: Final[float] = 3.0
 
 #: Component name for the cache probe. Tier components use `Tier.value`.
 _CACHE_COMPONENT: Final[str] = "cache"
@@ -131,7 +150,11 @@ def get_cache_backend(request: Request) -> CacheBackend | None:
 
 
 async def _probe(
-    name: str, probe: Callable[[], Awaitable[bool]], timeout_s: float
+    name: str,
+    probe: Callable[[], Awaitable[bool]],
+    timeout_s: float,
+    *,
+    reason: Callable[[], Awaitable[str | None]] | None = None,
 ) -> ReadyComponent:
     """Run one availability probe, converting every failure mode into a verdict.
 
@@ -140,10 +163,15 @@ async def _probe(
     that promise on trust — a probe that throws is exactly the symptom this
     endpoint exists to report.
 
-    The `detail` carries the exception *type*, never its message: a connection
-    error from Redis renders the URL it failed to reach, and that URL may carry
-    a password. The full exception goes to the log, which is already an
-    authenticated surface.
+    The `detail` on a *raised* exception carries the exception type, never its
+    message: a connection error from Redis renders the URL it failed to reach,
+    and that URL may carry a password. The full exception goes to the log,
+    which is already an authenticated surface. `reason` is different — it is
+    `Tier.unavailable_reason`, which is written to return an operator-safe
+    string already (no secrets, no raw exception text) — see its own
+    docstring — so it is used verbatim when a caller supplies one; a bare
+    "reported unavailable" only remains for the callers that do not (the
+    cache probe has no equivalent to ask).
     """
     try:
         available = await asyncio.wait_for(probe(), timeout_s)
@@ -153,9 +181,19 @@ async def _probe(
         _log.warning("readiness.probe_raised", component=name, error=type(exc).__name__)
         return ReadyComponent(name=name, ready=False, detail=f"probe raised {type(exc).__name__}")
 
-    return ReadyComponent(
-        name=name, ready=available, detail=None if available else "reported unavailable"
-    )
+    if available:
+        return ReadyComponent(name=name, ready=True, detail=None)
+
+    detail = "reported unavailable"
+    if reason is not None:
+        try:
+            specific = await asyncio.wait_for(reason(), timeout_s)
+        except Exception as exc:
+            _log.debug("readiness.reason_probe_raised", component=name, error=type(exc).__name__)
+            specific = None
+        if specific:
+            detail = specific
+    return ReadyComponent(name=name, ready=False, detail=detail)
 
 
 async def _probe_tiers(tiers: Sequence[TierProtocol]) -> list[ReadyComponent]:
@@ -168,7 +206,15 @@ async def _probe_tiers(tiers: Sequence[TierProtocol]) -> list[ReadyComponent]:
     """
     return list(
         await asyncio.gather(
-            *(_probe(tier.tier.value, tier.is_available, _PROBE_TIMEOUT_S) for tier in tiers)
+            *(
+                _probe(
+                    tier.tier.value,
+                    tier.is_available,
+                    _PROBE_TIMEOUT_S,
+                    reason=tier.unavailable_reason,
+                )
+                for tier in tiers
+            )
         )
     )
 
@@ -263,10 +309,28 @@ async def ready(
     summary="Tier inventory and service limits",
     description=(
         "What this deployment can do right now: which rungs are enabled and "
-        "available, their model versions, and the request limits in force."
+        "available, their model versions, and the request limits in force. "
+        "Authenticated and rate-limited like `/v1/classify` — unlike liveness "
+        "and readiness, this is deployment detail for an operator, not a "
+        "boolean a load balancer or kubelet needs to probe."
     ),
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "model": ProblemDetail,
+            "description": "No `X-API-Key` header was supplied.",
+        },
+        status.HTTP_403_FORBIDDEN: {
+            "model": ProblemDetail,
+            "description": "The key is unknown, malformed or revoked.",
+        },
+        status.HTTP_429_TOO_MANY_REQUESTS: {
+            "model": ProblemDetail,
+            "description": "Quota exhausted for this key. Carries `Retry-After`.",
+        },
+    },
 )
 async def capabilities(
+    key: RateLimitedKeyDep,
     settings: Settings = Depends(get_app_settings),
     tiers: Sequence[TierProtocol] = Depends(get_registered_tiers),
 ) -> CapabilitiesResponse:
@@ -275,6 +339,13 @@ async def capabilities(
     Reported over the full ladder rather than only the constructed rungs, so a
     tier switched off in config is visibly *absent by choice* rather than
     missing from the list and indistinguishable from one that failed to load.
+
+    Authenticated and rate-limited, unlike its two siblings above: it discloses
+    configured model/alias names, which Tier-1 scorer backend actually loaded,
+    and per-tier availability — real deployment detail, not the liveness/
+    readiness boolean a load balancer or kubelet needs to probe without
+    credentials. `key` is otherwise unused here; the dependency's job is the
+    401/403/429 it can raise before the handler body runs.
     """
     instances = {tier.tier: tier for tier in tiers}
     probes = {component.name: component for component in await _probe_tiers(tiers)}

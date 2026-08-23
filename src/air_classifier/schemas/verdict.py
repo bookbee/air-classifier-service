@@ -9,10 +9,19 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from air_classifier.constants import STOP_REASONS, EscalationReason, Label, Tier
+from air_classifier.constants import (
+    SILENT_STOP_REASONS,
+    EscalationReason,
+    Intent,
+    Label,
+    Tier,
+    Tone,
+    Topic,
+)
 from air_classifier.schemas.common import (
     Aspect,
     Emotion,
+    LabeledScore,
     SentimentResult,
     TierUsage,
 )
@@ -28,6 +37,16 @@ class TierVerdict(BaseModel):
     result: SentimentResult
     aspects: list[Aspect] = Field(default_factory=list)
     emotions: list[Emotion] = Field(default_factory=list)
+    #: `/v1/classify` fields. `None`/empty on every T0/T1 verdict and on a T2/T3
+    #: verdict for any other resource — those tiers structurally cannot produce
+    #: them (no lexicon or classifier head for tone/topic/intent), and the
+    #: other resources' prompts never ask for them. `urgency` is the one
+    #: exception: it *can* come from a lower tier, via the heuristic in
+    #: `pipeline/service.py`, which runs after the ladder rather than inside it
+    #: — so it is never set on a `TierVerdict` directly, only on the response.
+    tone: LabeledScore[Tone] | None = None
+    topics: list[LabeledScore[Topic]] = Field(default_factory=list)
+    intent: LabeledScore[Intent] | None = None
     label_margin: float = Field(
         default=0.0, ge=0.0, le=1.0, description="Top-1 minus top-2 probability."
     )
@@ -128,8 +147,12 @@ class EscalationStep(BaseModel):
     def build(cls, verdict: TierVerdict, decision: EscalationDecision) -> EscalationStep:
         # A terminal step carries null rather than a stop-reason code: the caller
         # asked "why did you keep going", and "you didn't" is best said with null.
+        # `NEXT_TIER_UNAVAILABLE` is the one stop reason that does not get this
+        # silence — it means the ladder wanted to keep going and a dependency
+        # was not there, which is worth a caller (or DevOps, reading the same
+        # response) actually seeing rather than reading as a confident answer.
         because: str | None = None
-        if decision.escalate or decision.primary_reason not in STOP_REASONS:
+        if decision.escalate or decision.primary_reason not in SILENT_STOP_REASONS:
             because = decision.as_label()
         return cls(
             tier=verdict.tier,
@@ -199,6 +222,23 @@ class LLMSentimentOutput(BaseModel):
     language_code: str = Field(
         default="und", max_length=8, description="ISO 639-1 code of the input text."
     )
+    #: `/v1/classify` only. Optional rather than a second output schema: every
+    #: resource shares one structured-output contract, and the user turn's
+    #: resource framing (`providers/prompts/loader.py`) is what tells the model
+    #: whether to fill these or leave them at their default. A model that was
+    #: never asked pays nothing for fields it did not populate.
+    tone: LabeledScore[Tone] | None = Field(
+        default=None, description="Emotional register — fill only when the task asks for it."
+    )
+    topics: list[LabeledScore[Topic]] = Field(
+        default_factory=list,
+        max_length=6,
+        description="What the text discusses — fill only when the task asks for it.",
+    )
+    intent: LabeledScore[Intent] | None = Field(
+        default=None,
+        description="What the author wants done — fill only when the task asks for it.",
+    )
 
     def to_verdict(
         self,
@@ -219,6 +259,9 @@ class LLMSentimentOutput(BaseModel):
             ),
             aspects=list(self.aspects),
             emotions=list(self.emotions),
+            tone=self.tone,
+            topics=list(self.topics),
+            intent=self.intent,
             # An LLM gives no runner-up distribution, so margin is derived from
             # confidence: a 0.9-confident answer implies a wide gap to second place.
             label_margin=max(0.0, min(1.0, (self.confidence - 0.5) * 2.0)),

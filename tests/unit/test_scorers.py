@@ -24,6 +24,7 @@ from air_classifier.pipeline.tiers.scorers import (
     ScorerBackend,
     ScoreResult,
     ScorerUnavailableError,
+    ZeroShotOnnxScorer,
     apply_temperature,
     blend,
     build_scorer,
@@ -337,3 +338,125 @@ def test_build_scorer_falls_back_even_with_a_configured_artifact(
 
 def test_the_selected_backend_satisfies_the_protocol(settings: Settings) -> None:
     assert isinstance(build_scorer(settings), ScorerBackend)
+
+
+# ── Zero-shot ONNX backend ──────────────────────────────────────────────────────
+#
+# Availability guards mirror OnnxScorer's exactly: both go through the same
+# `_load_onnx_session` helper, so the same fixture proves the same three ways
+# to fail to load leave `available` false rather than raising.
+
+
+def test_the_zero_shot_backend_is_unavailable_without_a_configured_artifact(
+    settings: Settings,
+) -> None:
+    scorer = ZeroShotOnnxScorer(settings)
+
+    assert scorer.available is False
+    assert "onnx" in scorer.name
+
+
+def test_the_zero_shot_backend_is_unavailable_when_the_runtime_is_not_installed(
+    settings: Settings, artifact: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _absent(name: str) -> object:
+        raise ImportError(f"No module named {name!r}")
+
+    monkeypatch.setattr(scorers, "_import_optional", _absent)
+
+    assert ZeroShotOnnxScorer(_with_classifier(settings, model_path=artifact)).available is False
+
+
+def test_the_zero_shot_backend_is_unavailable_when_the_tokenizer_is_missing(
+    settings: Settings, artifact: Path
+) -> None:
+    artifact.parent.joinpath("tokenizer.json").unlink()
+
+    assert ZeroShotOnnxScorer(_with_classifier(settings, model_path=artifact)).available is False
+
+
+def test_an_unloaded_zero_shot_backend_refuses_to_score_rather_than_returning_a_guess(
+    settings: Settings,
+) -> None:
+    with pytest.raises(ScorerUnavailableError):
+        ZeroShotOnnxScorer(settings).score("anything at all")
+
+
+def test_build_scorer_dispatches_on_scorer_kind(
+    settings: Settings, artifact: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two artifacts at the same path mean two different things, so the
+    dispatch has to come from configuration, not from probing the file."""
+
+    def _absent(name: str) -> object:
+        raise ImportError(f"No module named {name!r}")
+
+    monkeypatch.setattr(scorers, "_import_optional", _absent)
+
+    zero_shot = build_scorer(
+        _with_classifier(settings, model_path=artifact, scorer_kind="zero_shot_nli")
+    )
+    sequence = build_scorer(
+        _with_classifier(settings, model_path=artifact, scorer_kind="sequence_classification")
+    )
+    # Both fall back to the lexicon here (the runtime is patched absent), but
+    # the *name* each attempted and logged before falling back differs, which
+    # is the only externally visible proof dispatch actually happened.
+    assert isinstance(zero_shot, LexiconScorer)
+    assert isinstance(sequence, LexiconScorer)
+
+
+@pytest.mark.skipif(
+    not (Path("models") / "model.onnx").is_file(),
+    reason="real artifact not present — see scripts/export_zeroshot_model.py",
+)
+class TestZeroShotOnnxScorerAgainstTheRealArtifact:
+    """Exercises the actual exported model, when one is sitting in ./models.
+
+    Skipped everywhere else, deliberately: this needs a ~230MB file no CI
+    environment should have to fetch. It exists so that a local change to the
+    scoring math in this module gets checked against real weights before it
+    ships, not only against the fake-bytes fixture above.
+    """
+
+    @staticmethod
+    @pytest.fixture(scope="class")
+    def scorer() -> ZeroShotOnnxScorer:
+        settings = Settings(
+            classifier=ClassifierSettings(
+                model_path=Path("models/model.onnx"),
+                tokenizer_path=Path("models/tokenizer.json"),
+                scorer_kind="zero_shot_nli",
+            )
+        )
+        loaded = ZeroShotOnnxScorer(settings)
+        assert loaded.available, "models/model.onnx did not load — see its own log line for why"
+        return loaded
+
+    def test_clearly_positive_text_is_labelled_confidently(
+        self, scorer: ZeroShotOnnxScorer
+    ) -> None:
+        result = scorer.score(CLEAR_POSITIVE)
+        assert result.top_label is Label.POSITIVE
+        assert result.confidence > 0.8
+
+    def test_clearly_negative_text_is_labelled_confidently(
+        self, scorer: ZeroShotOnnxScorer
+    ) -> None:
+        result = scorer.score(CLEAR_NEGATIVE)
+        assert result.top_label is Label.NEGATIVE
+        assert result.confidence > 0.8
+
+    def test_a_factual_statement_is_labelled_neutral(self, scorer: ZeroShotOnnxScorer) -> None:
+        result = scorer.score("The package was delivered on Tuesday as scheduled.")
+        assert result.top_label is Label.NEUTRAL
+
+    def test_scoring_one_text_fits_comfortably_inside_the_tier_1_budget(
+        self, scorer: ZeroShotOnnxScorer, settings: Settings
+    ) -> None:
+        import time
+
+        started = time.perf_counter()
+        scorer.score(CLEAR_POSITIVE)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        assert elapsed_ms < settings.tiers.t1_classifier.timeout_ms

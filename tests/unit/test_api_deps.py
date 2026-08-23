@@ -52,7 +52,7 @@ from air_classifier.pipeline.policy import EscalationPolicy
 from air_classifier.schemas.common import Options
 from air_classifier.security.api_keys import (
     SCOPE_ADMIN_READ,
-    SCOPE_SENTIMENT_READ,
+    SCOPE_CLASSIFY_READ,
     ApiKeyRecord,
     ApiKeyStore,
     hash_key,
@@ -98,7 +98,7 @@ def make_key(
         id=key_id,
         name=f"name of {key_id}",
         key_hash=hash_key(raw, SALT),
-        scopes=scopes if scopes is not None else {SCOPE_SENTIMENT_READ},
+        scopes=scopes if scopes is not None else {SCOPE_CLASSIFY_READ},
         max_tier=max_tier,
         force_pii_redaction=force_pii_redaction,
         rate_limit_rpm=rate_limit_rpm,
@@ -138,8 +138,8 @@ def make_request(state: AppState | None, headers: dict[str, str] | None = None) 
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
-        "path": "/v1/sentiment",
-        "raw_path": b"/v1/sentiment",
+        "path": "/v1/classify",
+        "raw_path": b"/v1/classify",
         "root_path": "",
         "query_string": b"",
         "server": ("testserver", 80),
@@ -247,10 +247,10 @@ async def test_allow_unauthenticated_mints_the_anonymous_identity(
 
 
 async def test_scope_is_enforced(memory_cache: MemoryCache) -> None:
-    state = make_state(memory_cache, records=[make_key(scopes={SCOPE_SENTIMENT_READ})])
+    state = make_state(memory_cache, records=[make_key(scopes={SCOPE_CLASSIFY_READ})])
     request = make_request(state, {HEADER_API_KEY: RAW_KEY})
 
-    assert (await require_scope(SCOPE_SENTIMENT_READ)(request)).id == "key-1"
+    assert (await require_scope(SCOPE_CLASSIFY_READ)(request)).id == "key-1"
 
     with pytest.raises(InsufficientScopeError) as exc:
         await require_scope(SCOPE_ADMIN_READ)(request)
@@ -262,7 +262,7 @@ async def test_scope_check_still_reports_a_missing_key_as_401(memory_cache: Memo
     request = make_request(state)
 
     with pytest.raises(MissingApiKeyError):
-        await require_scope(SCOPE_SENTIMENT_READ)(request)
+        await require_scope(SCOPE_CLASSIFY_READ)(request)
 
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────

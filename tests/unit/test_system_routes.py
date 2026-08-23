@@ -22,16 +22,22 @@ from httpx import ASGITransport, AsyncClient
 from prometheus_client import CONTENT_TYPE_LATEST
 
 from air_classifier import __version__
+from air_classifier.api.deps import AppState
 from air_classifier.api.v1 import system
 from air_classifier.cache.base import CacheBackend
+from air_classifier.cache.memory import MemoryCache
 from air_classifier.config import AppSettings, ClassifierSettings, Settings, TierSettings
 from air_classifier.config import TiersSettings as TiersConfig
 from air_classifier.constants import Tier as TierId
 from air_classifier.observability import metrics
+from air_classifier.pipeline.orchestrator import Orchestrator
+from air_classifier.pipeline.policy import EscalationPolicy
 from air_classifier.pipeline.tiers.base import Tier as TierProtocol
 from air_classifier.pipeline.tiers.base import TierContext
 from air_classifier.pipeline.tiers.scorers import LEXICON_SCORER_NAME
 from air_classifier.schemas.verdict import TierVerdict
+from air_classifier.security.api_keys import ApiKeyStore
+from air_classifier.security.quotas import RateLimiter
 
 
 class ProbeExplodedError(AssertionError):
@@ -71,6 +77,9 @@ class StubTier:
         if self._delay_s:
             await asyncio.sleep(self._delay_s)
         return self._available
+
+    async def unavailable_reason(self) -> str | None:
+        return None if self._available else "stub unavailable"
 
     async def analyse(self, ctx: TierContext) -> TierVerdict:
         raise NotImplementedError("system routes never analyse")
@@ -122,6 +131,15 @@ def build_app(
 
     Mounted at ``/v1`` here because the router is prefix-less; in the real app
     the v1 aggregator supplies the same prefix.
+
+    ``/v1/capabilities`` now sits behind the same auth/rate-limit dependency
+    ``/v1/classify`` does, which reads a full :class:`AppState` off
+    ``app.state`` — a different, parallel convention from the three named
+    attributes set directly below, which ``/v1/health`` and ``/v1/ready``
+    still read without one (see ``main.py``'s lifespan comment on why both
+    exist). A minimal, always-open one is attached here so every test in this
+    file keeps working unauthenticated, the way ``/v1/health``/``/v1/ready``
+    still answer for real.
     """
     app = FastAPI()
     app.include_router(system.router, prefix="/v1")
@@ -129,6 +147,14 @@ def build_app(
     app.state.settings = settings
     app.state.tiers = tuple(tiers)
     app.state.cache = cache
+    AppState(
+        settings=settings,
+        cache=MemoryCache(),
+        api_keys=ApiKeyStore([], salt="test-salt", allow_unauthenticated=True),
+        rate_limiter=RateLimiter(MemoryCache(), settings),
+        orchestrator=Orchestrator((), EscalationPolicy(settings), settings),
+        tiers=tuple(tiers),
+    ).attach(app)
     return app
 
 
@@ -231,7 +257,9 @@ async def test_ready_is_degraded_not_unready_when_only_the_cloud_tier_is_down(
 
     failed = {c["name"]: c for c in body["components"] if not c["ready"]}
     assert set(failed) == {TierId.T3_CLOUD_LLM.value}
-    assert failed[TierId.T3_CLOUD_LLM.value]["detail"] == "reported unavailable"
+    # StubTier.unavailable_reason's own text, not the generic fallback — proof
+    # `/v1/ready` actually asks the tier why, rather than settling for "no".
+    assert failed[TierId.T3_CLOUD_LLM.value]["detail"] == "stub unavailable"
 
 
 async def test_ready_is_503_when_no_tier_can_serve(app_settings: Settings) -> None:
@@ -465,7 +493,7 @@ async def test_capabilities_reports_the_limits_a_caller_must_respect(
 
 async def test_metrics_returns_the_prometheus_exposition(app_settings: Settings) -> None:
     """Content type matters as much as the body: a scraper parses on it."""
-    metrics.record_request(endpoint="/v1/sentiment", status=200, api_key_id="test-key")
+    metrics.record_request(endpoint="/v1/classify", status=200, api_key_id="test-key")
     app = build_app(app_settings)
 
     async with await client_for(app) as client:

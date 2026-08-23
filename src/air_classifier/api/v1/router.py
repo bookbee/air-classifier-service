@@ -1,22 +1,18 @@
 """The ``/v1`` surface.
 
-This module does two jobs. It aggregates the four v1 routers under one prefix,
-and it owns the concerns shared by the three analysis resources but belonging to
-none of them: the request-scoped :class:`AnalysisService`, the effective batch
-ceiling, the batch envelope, and the error catalogue every analysis route
-advertises in its OpenAPI entry.
-
-Those helpers live here rather than in ``sentiment.py`` because none of the three
-resources is the senior one, and a limit check duplicated across three files is
-how two of them end up disagreeing about it after a refactor. The resource
-modules import them from here; this module imports the resource modules from
-inside :func:`build_v1_router`, which is what keeps that relationship from
-closing into an import cycle.
+Aggregates the ``/v1`` sub-routers under one prefix, and owns the concerns
+that belong to the HTTP layer generally rather than to ``classify.py``
+specifically: the request-scoped :class:`AnalysisService`, the batch size
+ceiling, idempotency replay, and the error catalogue the analysis route
+advertises in its OpenAPI entry. Kept separate from ``classify.py`` so that
+file stays a route handler and this one stays generic infrastructure — a
+distinction worth keeping even with one route today, because the alternative
+is route logic and request-plumbing tangled in the same file.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Depends, Request, Response, status
@@ -26,20 +22,14 @@ from air_classifier.api.errors import ValidationError
 from air_classifier.api.middleware import new_request_id
 from air_classifier.config import Settings
 from air_classifier.pipeline.service import AnalysisService
-from air_classifier.schemas.common import Options, RequestUsage
+from air_classifier.schemas.common import Options
 from air_classifier.schemas.errors import FieldError, ProblemDetail
-from air_classifier.schemas.responses import (
-    BaseAnalysisResponse,
-    BatchItemResult,
-    BatchResponse,
-)
 from air_classifier.security.api_keys import ApiKeyRecord
 
 __all__ = [
     "ANALYSIS_ERROR_RESPONSES",
     "V1_PREFIX",
     "AnalysisServiceDep",
-    "batch_response",
     "build_v1_router",
     "ensure_batch_size",
     "get_analysis_service",
@@ -88,11 +78,11 @@ def request_id_of(request: Request) -> str:
 def ensure_batch_size(count: int, settings: Settings) -> None:
     """Enforce ``app.max_batch_items``, the ceiling that actually applies.
 
-    ``BatchRequest`` caps items at 1000 so the schema has a bound at all; this is
-    the operator's number, and it is lower on every real deployment. Checked in
-    the route rather than in the model because it is configuration — a deployment
-    may raise or lower it without a schema change — and the caller is told the
-    limit they hit rather than the one in the schema.
+    The schema caps items at 1000 so it has a bound at all; this is the
+    operator's number, and it is lower on every real deployment. Checked in
+    the route rather than in the model because it is configuration — a
+    deployment may raise or lower it without a schema change — and the caller
+    is told the limit they hit rather than the one in the schema.
     """
     limit = settings.app.max_batch_items
     if count > limit:
@@ -132,45 +122,12 @@ def replay_response(stored: str) -> Response:
     return Response(content=stored, media_type=_JSON_MEDIA_TYPE)
 
 
-def batch_response[ResponseT: BaseAnalysisResponse](
-    model: type[BatchResponse[ResponseT]],
-    *,
-    request_id: str,
-    items: Sequence[BatchItemResult[ResponseT]],
-    latency_ms: float,
-) -> BatchResponse[ResponseT]:
-    """Wrap per-item outcomes in the batch envelope.
-
-    ``usage`` rolls up the items that succeeded only. A failed item consumed no
-    tier, and counting a slot that produced nothing would overstate what the
-    caller is billed for.
-    """
-    ordered = list(items)
-    succeeded = sum(1 for item in ordered if item.ok)
-    results = [item.result for item in ordered if item.result is not None]
-
-    return model(
-        request_id=request_id,
-        items=ordered,
-        succeeded=succeeded,
-        failed=len(ordered) - succeeded,
-        usage=RequestUsage(
-            tiers_run=sum(result.usage.tiers_run for result in results),
-            tokens_in=sum(result.usage.tokens_in for result in results),
-            tokens_out=sum(result.usage.tokens_out for result in results),
-            cache_read_tokens=sum(result.usage.cache_read_tokens for result in results),
-            est_cost_usd=sum(result.usage.est_cost_usd for result in results),
-        ),
-        latency_ms=max(0.0, round(latency_ms, 3)),
-    )
-
-
 # ── OpenAPI error catalogue ───────────────────────────────────────────────────
 
-#: Every analysis route can fail in exactly these ways — docs/02-lld.md §9.
-#: Declared once and attached to all six, so a generated client gets one error
-#: model everywhere — and so the *absence* of a "provider unavailable" entry is
-#: visible: a cloud outage is a 200 with ``degraded: true``, not an error.
+#: Every way the analysis route can fail — docs/02-lld.md §9. Declared once and
+#: attached to both its methods, so the *absence* of a "provider unavailable"
+#: entry is visible: a cloud outage is a 200 with ``degraded: true``, not an
+#: error.
 ANALYSIS_ERROR_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
     status.HTTP_400_BAD_REQUEST: {
         "model": ProblemDetail,
@@ -219,17 +176,15 @@ def build_v1_router() -> APIRouter:
     the sub-routers are imported, and so a test can build a second, independent
     instance without the first one's registrations leaking into it.
     """
-    # Imported here, not at module scope: the resource modules import the shared
-    # helpers above, and a module-level import in this direction would close the
-    # loop. Deferring it to construction time breaks the cycle without either
-    # side having to care about import order.
-    from air_classifier.api.v1 import feedback, reviews, sentiment, system
+    # Imported here, not at module scope: classify.py imports the shared
+    # helpers above, and a module-level import in this direction would close
+    # the loop. Deferring it to construction time breaks the cycle without
+    # either side having to care about import order.
+    from air_classifier.api.v1 import classify, system
 
     v1 = APIRouter(prefix=V1_PREFIX)
-    # System first so `/v1/health` keeps resolving even if a resource router ever
-    # grows a path that could shadow it.
+    # System first so `/v1/health` keeps resolving even if the analysis router
+    # ever grows a path that could shadow it.
     v1.include_router(system.router)
-    v1.include_router(sentiment.router)
-    v1.include_router(feedback.router)
-    v1.include_router(reviews.router)
+    v1.include_router(classify.router)
     return v1

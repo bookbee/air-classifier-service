@@ -19,14 +19,13 @@ from typing import Any
 import pytest
 
 from air_classifier.config import (
+    AirLlmSettings,
     AppSettings,
-    OllamaSettings,
-    ProvidersSettings,
     Settings,
     TierSettings,
     TiersSettings,
 )
-from air_classifier.constants import Label, Provider, ResourceKind, Tier
+from air_classifier.constants import Label, Provider, Tier
 from air_classifier.observability import metrics
 from air_classifier.pipeline.features import extract_features
 from air_classifier.pipeline.tiers import base as tier_base
@@ -79,6 +78,10 @@ class StubProvider:
     def configured(self) -> bool:
         return self._configured
 
+    @property
+    def health_detail(self) -> str | None:
+        return None if self._healthy else "stub unhealthy"
+
     async def health(self) -> bool:
         if self._health_error is not None:
             raise self._health_error
@@ -129,16 +132,13 @@ def _settings(*, timeout_ms: int = 4000, model: str = MODEL) -> Settings:
     return Settings(
         app=AppSettings(env="test"),
         tiers=TiersSettings(t2_local_llm=TierSettings(timeout_ms=timeout_ms)),
-        providers=ProvidersSettings(ollama=OllamaSettings(model=model)),
+        air_llm=AirLlmSettings(local_model=model),
     )
 
 
-def _ctx(
-    *, remaining_s: float = 5.0, resource: ResourceKind = ResourceKind.SENTIMENT
-) -> TierContext:
+def _ctx(*, remaining_s: float = 5.0) -> TierContext:
     return TierContext(
         request_id="req_test",
-        resource=resource,
         text=TEXT,
         original_length=len(TEXT),
         language=LanguageInfo(code="en", confidence=0.9),
@@ -175,7 +175,7 @@ def test_the_rung_identifies_itself_and_the_model_behind_it() -> None:
     tier = _tier(StubProvider())
 
     assert tier.tier is Tier.T2_LOCAL_LLM
-    assert tier.model_version == f"ollama/{MODEL}"
+    assert tier.model_version == MODEL
 
 
 def test_every_language_is_attempted_because_the_model_is_prompted_not_trained() -> None:
@@ -197,7 +197,9 @@ async def test_analyse_converts_the_model_output_into_a_verdict() -> None:
     assert verdict.result.label is Label.NEGATIVE
     assert verdict.result.confidence == pytest.approx(0.81)
     assert verdict.is_usable is True
-    assert verdict.model_version == f"ollama/{MODEL}"
+    # The resolved provider:model, not the tier's configured alias — the same
+    # shape Tier 3 reports, so a caller can always see who actually answered.
+    assert verdict.model_version == "ollama:llama3.2:3b"
     assert verdict.emotions[0].name == "annoyance"
     assert verdict.language_code == "en"
 
@@ -253,14 +255,14 @@ async def test_the_rung_sends_the_compact_prefix_and_the_shared_schema() -> None
     assert call["max_tokens"] > 0
 
 
-async def test_the_user_turn_carries_the_text_and_the_resource_framing() -> None:
+async def test_the_user_turn_carries_the_text_and_the_task_framing() -> None:
     provider = StubProvider(_result())
 
-    await _tier(provider).analyse(_ctx(resource=ResourceKind.REVIEWS))
+    await _tier(provider).analyse(_ctx())
 
     user = provider.calls[0]["user_content"]
     assert TEXT in user
-    assert "product review" in user
+    assert "distinct facets" in user
 
 
 # ── The single repair retry ───────────────────────────────────────────────────
@@ -415,3 +417,36 @@ async def test_a_health_probe_that_raises_reads_as_unavailable() -> None:
     provider = StubProvider(health_error=RuntimeError("socket exploded"))
 
     assert await _tier(provider).is_available() is False
+
+
+# ── unavailable_reason ───────────────────────────────────────────────────────
+
+
+async def test_unavailable_reason_is_none_when_available() -> None:
+    assert await _tier(StubProvider(healthy=True)).unavailable_reason() is None
+
+
+async def test_unavailable_reason_names_air_llm_not_the_vendor_label() -> None:
+    """`configured` is an air-llm-level check, not a per-vendor one — the
+    message must not send an operator looking for a vendor-specific knob."""
+    reason = await _tier(StubProvider(configured=False)).unavailable_reason()
+    assert reason == "air-llm not configured"
+
+
+async def test_unavailable_reason_names_the_open_breaker_before_probing_health() -> None:
+    """Same precedence `is_available` checks in — an open breaker is reported
+    even though the provider itself would answer `health_detail=None`."""
+    breaker = CircuitBreaker("ollama-test", threshold=1, cooldown_s=30.0)
+    await breaker.record_failure()
+    provider = StubProvider(healthy=True)
+
+    reason = await _tier(provider, breaker=breaker).unavailable_reason()
+
+    assert reason is not None
+    assert "circuit breaker open for ollama" in reason
+
+
+async def test_unavailable_reason_falls_through_to_the_providers_own_detail() -> None:
+    provider = StubProvider(healthy=False)
+
+    assert await _tier(provider).unavailable_reason() == "stub unhealthy"

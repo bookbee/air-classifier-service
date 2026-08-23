@@ -8,7 +8,7 @@ reading ``system.md`` off the filesystem.
 from __future__ import annotations
 
 from air_classifier.providers.prompts.loader import (
-    HAIKU_MIN_CACHEABLE_TOKENS,
+    CLOUD_MIN_CACHEABLE_TOKENS,
     estimated_system_tokens,
     repair_instruction,
     system_prompt,
@@ -16,7 +16,7 @@ from air_classifier.providers.prompts.loader import (
 )
 
 __all__ = [
-    "HAIKU_MIN_CACHEABLE_TOKENS",
+    "CLOUD_MIN_CACHEABLE_TOKENS",
     "estimated_system_tokens",
     "repair_instruction",
     "system_prompt",

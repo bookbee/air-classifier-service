@@ -43,8 +43,6 @@ _ADOPTED_LOGGERS: Final[tuple[str, ...]] = (
     "fastapi",
     "httpx",
     "httpcore",
-    "anthropic",
-    "openai",
 )
 
 #: The one handler this module owns. Kept so repeat configuration replaces it

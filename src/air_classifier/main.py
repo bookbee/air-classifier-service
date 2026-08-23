@@ -11,8 +11,8 @@ default.
 **A missing dependency is a deployment shape, not a failure.** The escalation
 ladder exists so that a cheaper rung answers when an expensive one cannot, and
 that promise has to hold at *startup* as well as per request: a deployment with
-no Anthropic key and no Ollama daemon must boot, serve, and report itself
-honestly on ``/v1/ready`` and ``/v1/capabilities``. So every rung is built
+air-llm entirely unreachable must boot, serve, and report itself honestly on
+``/v1/ready`` and ``/v1/capabilities``. So every rung is built
 inside :func:`_tier_guard`, which turns an unconfigured or broken dependency
 into a warning and a shorter ladder. The only thing that can stop this service
 from starting is something every rung needs — settings that will not validate,
@@ -61,13 +61,8 @@ from air_classifier.pipeline.tiers.t0_rules import RulesTier
 from air_classifier.pipeline.tiers.t1_classifier import ClassifierTier
 from air_classifier.pipeline.tiers.t2_local_llm import LocalLLMTier
 from air_classifier.pipeline.tiers.t3_cloud_llm import CloudLLMTier
-from air_classifier.providers.anthropic_provider import AnthropicProvider
+from air_classifier.providers.air_llm_provider import AirLlmProvider
 from air_classifier.providers.base import LLMProvider
-from air_classifier.providers.infra_provider import InfraGatewayProvider
-from air_classifier.providers.ollama_provider import OllamaProvider
-from air_classifier.providers.openai_provider import OpenAIProvider
-from air_classifier.providers.registry import ProviderRegistry
-from air_classifier.resilience.breaker import CircuitBreaker
 from air_classifier.security.api_keys import ApiKeyStore
 from air_classifier.security.quotas import RateLimiter
 
@@ -86,9 +81,10 @@ _TITLE: Final[str] = "AIR Classifier"
 _DESCRIPTION: Final[str] = """
 Layered text classification with cost-aware escalation.
 
-Three routes share one ladder and one response envelope: `/v1/sentiment` for the
-base verdict on any text, `/v1/feedback` for triage (urgency, actionability,
-routing), and `/v1/reviews` for aspect scoring and rating consistency.
+One entry point, `/v1/classify`, and one detailed response: sentiment, tone,
+topics, intent, urgency, routing, a requires-human flag, aspect-level scoring
+and rating consistency — whichever of those the text and the ladder's reach
+actually support.
 
 Every request enters at the cheapest rung of a four-tier ladder — deterministic
 rules, a statistical classifier, a locally served LLM, a metered cloud LLM — and
@@ -137,9 +133,10 @@ class OrjsonResponse(JSONResponse):
 class _TierUnconfiguredError(Exception):
     """A rung's dependency is absent, so the rung is not built.
 
-    Deliberately distinct from a build *failure*: "no Anthropic key" is a
-    supported deployment, "the classifier raised while loading" is a defect, and
-    an operator reading the boot log needs to tell those two apart at a glance.
+    Deliberately distinct from a build *failure*: "air-llm is not configured"
+    is a supported deployment, "the classifier raised while loading" is a
+    defect, and an operator reading the boot log needs to tell those two
+    apart at a glance.
     """
 
 
@@ -153,9 +150,6 @@ class Ladder:
     """
 
     tiers: tuple[TierProtocol, ...] = ()
-    #: ``None`` when no cloud provider has credentials — a local-only
-    #: deployment, not a misconfiguration.
-    registry: ProviderRegistry | None = None
     providers: tuple[LLMProvider, ...] = field(default_factory=tuple)
 
 
@@ -164,9 +158,10 @@ def _tier_guard(tier: TierId) -> Iterator[None]:
     """Let one rung fail to build without taking the service down.
 
     This is the single most important behaviour in this module. Without it, a
-    revoked cloud key or a stopped Ollama daemon would turn a service designed
-    to degrade into one that cannot start — and a crash loop at boot is strictly
-    worse than a shorter ladder, because a shorter ladder still answers.
+    revoked air-llm token or air-llm itself being unreachable would turn a
+    service designed to degrade into one that cannot start — and a crash loop
+    at boot is strictly worse than a shorter ladder, because a shorter ladder
+    still answers.
 
     The exception's message is logged but never reaches a caller: it can carry a
     file path or a base URL, and ``/v1/capabilities`` already reports the
@@ -195,7 +190,6 @@ def build_ladder(settings: Settings) -> Ladder:
     enabled = set(settings.enabled_tiers())
     tiers: list[TierProtocol] = []
     providers: list[LLMProvider] = []
-    registry: ProviderRegistry | None = None
 
     if TierId.T0_RULES in enabled:
         with _tier_guard(TierId.T0_RULES):
@@ -211,75 +205,41 @@ def build_ladder(settings: Settings) -> Ladder:
 
     if TierId.T2_LOCAL_LLM in enabled:
         with _tier_guard(TierId.T2_LOCAL_LLM):
-            ollama = _local_provider(settings)
+            local = AirLlmProvider(settings, Provider.OLLAMA)
             # Constructing the provider does no I/O, so `configured` here means
             # "switched on", not "reachable". Reachability is a readiness
-            # question, and the rung is built either way so that a daemon
-            # starting up after the service does not need a restart to be used.
-            if not ollama.configured:
-                raise _TierUnconfiguredError("ollama is disabled in configuration")
-            providers.append(ollama)
-            tiers.append(LocalLLMTier(settings, ollama))
+            # question, and the rung is built either way so that air-llm
+            # coming up after this service does not need a restart to be used.
+            if not local.configured:
+                raise _TierUnconfiguredError("air_llm is disabled in configuration")
+            providers.append(local)
+            tiers.append(LocalLLMTier(settings, local))
 
     if TierId.T3_CLOUD_LLM in enabled:
         with _tier_guard(TierId.T3_CLOUD_LLM):
-            candidates = _cloud_providers(settings)
+            cloud = AirLlmProvider(settings, Provider.ANTHROPIC)
             # Appended before the credential check so that shutdown still closes
-            # a provider whose SDK client was built but whose tier was skipped.
-            providers.extend(candidates)
-            usable = {p.name: p for p in candidates if p.configured}
-            if not usable:
-                raise _TierUnconfiguredError("no cloud provider has credentials")
-            registry = ProviderRegistry(
-                settings,
-                usable,
-                {
-                    name: CircuitBreaker.from_settings(name.value, settings.resilience)
-                    for name in usable
-                },
-            )
-            tiers.append(CloudLLMTier(settings, registry))
+            # a provider whose HTTP client was built but whose tier was skipped.
+            providers.append(cloud)
+            if not cloud.configured:
+                raise _TierUnconfiguredError("air_llm is disabled in configuration")
+            tiers.append(CloudLLMTier(settings, cloud))
 
     _log.info(
         "startup.ladder_built",
         tiers=[tier.tier.value for tier in tiers],
-        # Only the usable ones: a provider that was constructed without
-        # credentials is an implementation detail of the check above, and naming
-        # it here would read as "anthropic is available" in the boot log.
-        providers=[p.name.value for p in providers if p.configured],
+        # Only the ones with credentials — a provider built without any is an
+        # implementation detail of the check above. Named `configured`, not
+        # `providers` or `available`: `configured` is a no-I/O settings check
+        # (AirLlmProvider.configured's own docstring), not a reachability
+        # probe, and this line runs once at boot before anything has actually
+        # been dialled. Listing it here as if it were verified would read as
+        # "air-llm is available" at exactly the moment nobody has checked —
+        # `/v1/ready` and `/v1/capabilities` are the honest, continuously
+        # re-checked signal for that, not this line.
+        configured=[p.name.value for p in providers if p.configured],
     )
-    return Ladder(tiers=tuple(tiers), registry=registry, providers=tuple(providers))
-
-
-def _local_provider(settings: Settings) -> LLMProvider:
-    """The Tier-2 backend: the air-infra gateway when enabled, else Ollama direct.
-
-    In gateway mode the model asked for is still ``providers.ollama.model``; only
-    the transport changes, so the rung's timeouts and prompt stay as they were.
-    """
-    if settings.providers.gateway.enabled:
-        return InfraGatewayProvider(settings, Provider.OLLAMA)
-    return OllamaProvider(settings)
-
-
-def _cloud_providers(settings: Settings) -> list[LLMProvider]:
-    """Both metered backends, configured or not.
-
-    Built unconditionally because ``configured`` is the only honest way to ask
-    whether an SDK is installed *and* a key is present, and because the
-    registry's preference order is settings-driven — filtering here on
-    ``providers.preference`` would let a reordering silently drop a backend.
-
-    In gateway mode each backend is an :class:`InfraGatewayProvider` pinned to
-    its provider identity, so the registry keys and fails over between them
-    exactly as it does the direct SDK adapters.
-    """
-    if settings.providers.gateway.enabled:
-        return [
-            InfraGatewayProvider(settings, Provider.ANTHROPIC),
-            InfraGatewayProvider(settings, Provider.OPENAI),
-        ]
-    return [AnthropicProvider(settings), OpenAIProvider(settings)]
+    return Ladder(tiers=tuple(tiers), providers=tuple(providers))
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -324,7 +284,6 @@ def _lifespan(settings: Settings) -> Callable[[FastAPI], AbstractAsyncContextMan
             api_keys=api_keys,
             rate_limiter=rate_limiter,
             orchestrator=orchestrator,
-            registry=ladder.registry,
             tiers=ladder.tiers,
         ).attach(app)
 

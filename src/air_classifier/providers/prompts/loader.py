@@ -3,18 +3,21 @@
 The split between the two halves of a request is dictated by prompt-cache
 economics rather than by taste.
 
-``system.md`` is the **stable prefix**: one file covering all three resources,
-read once at import, byte-identical on every call forever. One prefix means one
-cache entry and the highest achievable hit rate. It is also deliberately long —
-Anthropic will not cache a prefix below a per-model minimum (4096 tokens for
-Claude Haiku 4.5, our default cloud model; 1024 for Claude Sonnet 5, the
-arbiter), and *below that minimum nothing errors*: the cache silently never
-fills and we pay full input price on every call. A rich rubric that clears the
-floor is cheaper than a terse one that does not, because from the second request
-onward it bills at roughly a tenth of the input rate.
+``system.md`` is the **stable prefix**: one file, read once at import,
+byte-identical on every call forever. One prefix means one cache entry and the
+highest achievable hit rate. It is also deliberately long — whichever provider
+currently answers Tier 3's default call will not cache a prefix below its own
+per-model minimum (4096 tokens measured against the provider behind
+``air_llm.cloud_model``'s default rung; 1024 against the one behind
+``arbiter_model``'s), and *below that minimum nothing errors*: the cache
+silently never fills and every call pays full input price. A rich rubric that
+clears the floor is cheaper than a terse one that does not, because from the
+second request onward the cached portion bills at roughly a tenth of the
+input rate. Which specific provider that is, and its exact floor, is air-llm's
+routing to decide and re-measure — the number here is current, not a promise.
 
-Everything request-specific — the text, the resource framing, the rating, what
-the cheaper tiers already concluded — goes in the user turn, which is never
+Everything request-specific — the text, the caller's optional fields, what the
+cheaper tiers already concluded — goes in the user turn, which is never
 cached. Nothing in this module interpolates anything into the system prompt.
 """
 
@@ -23,7 +26,7 @@ from __future__ import annotations
 from importlib import resources
 from typing import Any, Final
 
-from air_classifier.constants import Label, ResourceKind
+from air_classifier.constants import Label
 from air_classifier.pipeline.tiers.base import TierContext
 
 _PROMPT_PACKAGE: Final[str] = "air_classifier.providers.prompts"
@@ -47,37 +50,39 @@ _SYSTEM_COMPACT_PROMPT: Final[str] = _read(_SYSTEM_COMPACT_FILE)
 #: ever used to check headroom against the cache floor, never for billing.
 _CHARS_PER_TOKEN: Final[float] = 3.7
 
-#: Anthropic's minimum cacheable prefix for Claude Haiku 4.5, our default cloud
-#: model. A shorter system prompt disables prompt caching outright — silently.
-HAIKU_MIN_CACHEABLE_TOKENS: Final[int] = 4096
+#: Minimum cacheable prefix on the provider currently behind
+#: `air_llm.cloud_model`'s default rung. A shorter system prompt disables
+#: prompt caching outright — silently.
+CLOUD_MIN_CACHEABLE_TOKENS: Final[int] = 4096
 
-#: How each endpoint family wants the same rubric applied. This lives in the
-#: user turn precisely so that all three resources share one cached prefix.
-_RESOURCE_FRAMING: Final[dict[ResourceKind, str]] = {
-    ResourceKind.SENTIMENT: (
-        "General-purpose sentiment analysis. Assume no domain; judge the text on its own terms. "
-        "Aspects are usually absent here — return none rather than inventing structure."
-    ),
-    ResourceKind.FEEDBACK: (
-        "User feedback sent to a product team. Judge the attitude, not the politeness: a "
-        "courteous complaint is negative, and a feature request implies dissatisfaction with "
-        "the present state. Note anything that reads as urgent or blocking in the rationale."
-    ),
-    ResourceKind.REVIEWS: (
-        "A product review. Aspect-level sentiment matters as much as the overall label, and "
-        "reviews are mixed more often than a single label suggests. Extract every facet the "
-        "author actually evaluates."
-    ),
-}
+#: The task framing every request gets. One route now, one framing — merged
+#: from what used to be three separate ones (plain sentiment, feedback triage,
+#: product reviews), because the text itself is what tells the model which of
+#: those shapes it is looking at, not which endpoint it arrived through.
+_TASK_FRAMING: Final[str] = (
+    "A single piece of text headed for classification — plain sentiment, user feedback, "
+    "a product review, or anything in between; nothing about the request tells you which, "
+    "so read it off the text and the fields below. Judge the attitude, not the politeness: "
+    "a courteous complaint is negative, and a feature request implies dissatisfaction with "
+    "the present state. Note anything that reads as urgent or blocking in the rationale. "
+    "When the text evaluates distinct facets — of a product, a service, an experience — "
+    "score every one it actually discusses; when it does not, return no aspects rather "
+    "than inventing structure. Fill `tone`, `topics` and `intent` using the closed "
+    "vocabularies defined for them, and leave a field unset rather than guessing when the "
+    "text does not support it."
+)
 
-#: Resource-specific inputs, in a fixed order. Iterating a literal tuple rather
-#: than the dict keeps the user turn stable for identical requests, which is
-#: what makes response caching and idempotency replay work.
-_RESOURCE_FIELDS: Final[dict[ResourceKind, tuple[str, ...]]] = {
-    ResourceKind.SENTIMENT: (),
-    ResourceKind.FEEDBACK: ("subject", "channel", "user_segment"),
-    ResourceKind.REVIEWS: ("title", "product_id", "verified_purchase"),
-}
+#: The caller's optional fields, in a fixed order. Iterating a literal tuple
+#: rather than a dict keeps the user turn stable for identical requests, which
+#: is what makes response caching and idempotency replay work.
+_RESOURCE_FIELDS: Final[tuple[str, ...]] = (
+    "title",
+    "subject",
+    "channel",
+    "user_segment",
+    "product_id",
+    "verified_purchase",
+)
 
 _FIELD_LABELS: Final[dict[str, str]] = {
     "subject": "Subject line",
@@ -107,16 +112,21 @@ def system_prompt() -> str:
 def compact_system_prompt() -> str:
     """The prefix for **locally served** models.
 
-    The long prompt's justification is entirely an argument about Anthropic's
-    prompt cache, and none of it transfers to a model running on our own
-    hardware: Ollama has no cross-request prefix cache to amortise the cost
-    against, so every one of those tokens is re-processed on every call.
+    The long prompt's justification is entirely an argument about a remote
+    provider's prompt cache, and none of it transfers to a model running on
+    our own hardware: a local runtime has no cross-request prefix cache to
+    amortise the cost against, so every one of those tokens is re-processed
+    on every call.
 
-    Measured on ``llama3.2:3b``, the full prefix takes ~9.9s against ~1.5s for a
-    short one — roughly 2.5x the entire Tier-2 timeout budget, spent re-reading
-    a rubric the model cannot remember between calls. Worse, the full prefix is
-    over twice ``providers.ollama.num_ctx``, so it was being silently truncated:
-    we paid the latency *and* lost the guidance.
+    Measured against the model `air_llm.local_model` resolved to at the time,
+    the full prefix took ~9.9s against ~1.5s for a short one — roughly 2.5x
+    the entire Tier-2 timeout budget, spent re-reading a rubric the model
+    cannot remember between calls. Worse, the full prefix was over twice the
+    context window that local runtime was configured with, so it was being
+    silently truncated: we paid the latency *and* lost the guidance. That
+    context-window knob now lives in air-llm's own configuration, not this
+    service's — but the prompt-size lesson still applies to whatever runs
+    behind Tier 2's ``local_model``, so the short prompt stays.
 
     So the local rung gets its own prompt, carrying the same taxonomy, polarity
     anchors, and — critically — the same confidence-calibration rubric, because
@@ -150,7 +160,7 @@ def user_content(ctx: TierContext) -> str:
     """
     sections: list[str] = [
         "## Task",
-        _RESOURCE_FRAMING[ctx.resource],
+        _TASK_FRAMING,
         "",
         "## Context",
         *_context_lines(ctx),
@@ -209,7 +219,7 @@ def _context_lines(ctx: TierContext) -> list[str]:
     if rating is not None:
         lines.append(rating)
 
-    for field in _RESOURCE_FIELDS[ctx.resource]:
+    for field in _RESOURCE_FIELDS:
         value = ctx.resource_fields.get(field)
         if value is None or value == "":
             continue

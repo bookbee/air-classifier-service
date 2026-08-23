@@ -75,8 +75,8 @@ class LocalLLMTier:
     ) -> None:
         self._settings = settings
         self._provider = provider
-        self._model = settings.providers.ollama.model
-        self.model_version = f"{provider.name.value}/{self._model}"
+        self._model = settings.air_llm.local_model
+        self.model_version = self._model
 
         # Both guards are named after the *dependency*, not the rung: they exist
         # to protect one daemon, so anything else that reaches it must be able to
@@ -100,6 +100,18 @@ class LocalLLMTier:
             # already told us what we needed to know.
             logger.debug("tier.t2.health_raised", tier=self.tier.value)
             return False
+
+    async def unavailable_reason(self) -> str | None:
+        """Same order `is_available` checks in, so the two cannot disagree
+        about *which* condition is the one actually blocking this rung."""
+        if not self._provider.configured:
+            # `configured` is an air-llm-level check (AIR_LLM__ENABLED /
+            # AIR_LLM__TOKEN), not per-vendor — naming the breaker label here
+            # would send an operator looking for a knob that does not exist.
+            return "air-llm not configured"
+        if not self._breaker.is_closed:
+            return f"circuit breaker open for {self._provider.name.value} — retries after cooldown"
+        return self._provider.health_detail
 
     def supports_language(self, code: str) -> bool:
         """Every language. An instruction-tuned model is prompted, not trained.
@@ -140,7 +152,7 @@ class LocalLLMTier:
         )
         return parsed.to_verdict(
             self.tier,
-            model_version=self.model_version,
+            model_version=f"{result.provider.value}:{result.model}",
             latency_ms=latency_ms,
             usage=result.to_usage(),
         )

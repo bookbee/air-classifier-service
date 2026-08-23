@@ -76,6 +76,10 @@ class ClassifierTier:
         """True whenever any backend loaded — which the lexicon always does."""
         return self._scorer.available or self._lexicon.available
 
+    async def unavailable_reason(self) -> str | None:
+        """Never called for real — the lexicon backend always loads."""
+        return None
+
     def supports_language(self, code: str) -> bool:
         """Whether the live backend was trained for `code`.
 

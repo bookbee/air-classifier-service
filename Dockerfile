@@ -34,19 +34,44 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-deps --force-reinstall .
 
 
-# ── Model bake-in ─────────────────────────────────────────────────────────────
-# The Tier-1 artifact ships inside the image: reproducible builds and zero
-# cold-start network beat image size (docs/00-plan.md §4). The step is
-# best-effort by design — see scripts/fetch_model.py.
+# ── Model bake-in (currently inert; see below) ─────────────────────────────────
+# This stage exists to bake the Tier-1 artifact into the image — reproducible
+# builds and zero cold-start network beat image size — but ships empty by
+# default: MODEL_URL/TOKENIZER_URL below have no value to default to yet.
+#
+# Tier 1's default backend (docs/02-lld.md §6) is a quantised DeBERTa-v3
+# zero-shot NLI head, not the SST-2 sequence-classification head this service
+# shipped with first — `pipeline/tiers/scorers.py`'s module docstring explains
+# why. Unlike that first artifact, nobody has published a ready ONNX export of
+# `MoritzLaurer/deberta-v3-base-zeroshot-v1`, so `fetch_model.py`'s plain
+# download cannot get one from a URL that does not exist yet. `scripts/
+# export_zeroshot_model.py` produces it — run once, by a maintainer, outside
+# this build (it needs torch + optimum, ~2GB of tooling a serving image has no
+# other reason to carry). Until its output is hosted somewhere this build can
+# fetch from (a GitHub release on this repo is the obvious default), the
+# supported path is `docker-compose.yml`'s `./models:/opt/models:ro` bind
+# mount, which reads from the very directory the export script writes to —
+# not this stage.
+#
+# MODEL_URL/MODEL_SHA256/TOKENIZER_URL/TOKENIZER_SHA256 below are therefore
+# empty until that hosting step happens. Empty is a supported, tested shape —
+# fetch_model.py already treats a missing artifact as a normal, non-fatal
+# outcome (Tier 1 falls back to its lexicon scorer, reported as degraded by
+# /v1/capabilities) — so the image still builds and still serves correctly
+# with these unset; it just does not get the accuracy the model backend buys,
+# and relies on the compose mount to get it instead. Fill in all four once the
+# artifact is published, and this stage's bake-in becomes the primary path
+# again; MODEL_REPO/MODEL_REVISION are recorded for provenance and matter to
+# the export script, not to the fetch below.
 FROM ${PYTHON_IMAGE} AS model
 
 ARG MODEL_DIR
-ARG MODEL_REPO=Xenova/distilbert-base-uncased-finetuned-sst-2-english
-ARG MODEL_REVISION=0b6928efcb76139cae2c6881d49cda67fe119f42
-ARG MODEL_URL=https://huggingface.co/${MODEL_REPO}/resolve/${MODEL_REVISION}/onnx/model_quantized.onnx
-ARG MODEL_SHA256=79b45c7fd8c2673aa53615aba07caeb2de798f63a95a2393a365982429c94f7f
-ARG TOKENIZER_URL=https://huggingface.co/${MODEL_REPO}/resolve/${MODEL_REVISION}/tokenizer.json
-ARG TOKENIZER_SHA256=d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66
+ARG MODEL_REPO=MoritzLaurer/deberta-v3-base-zeroshot-v1
+ARG MODEL_REVISION=c2040e8a2599abd2925fdc716cf40e8052d56ec4
+ARG MODEL_URL=
+ARG MODEL_SHA256=
+ARG TOKENIZER_URL=
+ARG TOKENIZER_SHA256=
 
 COPY scripts/fetch_model.py /usr/local/bin/fetch_model.py
 
@@ -68,7 +93,7 @@ ARG VENV
 ARG MODEL_DIR
 
 LABEL org.opencontainers.image.title="air-classifier" \
-      org.opencontainers.image.description="Layered sentiment analysis with cost-aware escalation" \
+      org.opencontainers.image.description="Layered text classification with cost-aware escalation" \
       org.opencontainers.image.source="https://github.com/bookbee/air-classifier" \
       org.opencontainers.image.licenses="Proprietary"
 

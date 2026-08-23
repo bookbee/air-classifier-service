@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 from typing import Protocol, runtime_checkable
 
-from air_classifier.constants import ResourceKind
 from air_classifier.schemas.common import Options
 
 
@@ -42,14 +41,15 @@ class CacheBackend(Protocol):
 
 #: Bumped whenever a change would make previously cached verdicts wrong —
 #: a new tier, a changed prompt, a re-tuned threshold set. Cheaper and safer
-#: than trying to selectively invalidate.
-CACHE_SCHEMA_VERSION = "v1"
+#: than trying to selectively invalidate. v2: dropped the resource segment
+#: when `/sentiment`, `/feedback` and `/reviews` were removed — one route
+#: means one key shape, and the field never distinguished anything again.
+CACHE_SCHEMA_VERSION = "v2"
 
 
 def verdict_cache_key(
     *,
     prefix: str,
-    resource: ResourceKind,
     text: str,
     options: Options,
     resource_fields: dict[str, object] | None = None,
@@ -64,7 +64,6 @@ def verdict_cache_key(
     material = "\x1f".join(
         [
             CACHE_SCHEMA_VERSION,
-            resource.value,
             text,
             str(options.min_tier.value if options.min_tier else "-"),
             options.max_tier.value,

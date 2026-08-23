@@ -1,8 +1,10 @@
 """The LLM provider contract.
 
-One protocol covers both the local and the cloud tiers. Ollama is not a special
-case — it is a provider that happens to be free and nearby — so Tiers 2 and 3
-share their prompt building, schema derivation, and validation entirely.
+One protocol covers both the local and the cloud tiers. The local tier is not
+a special case — it is a model that happens to be free and nearby, with which
+concrete model that even is left entirely to air-llm's own routing — so Tiers
+2 and 3 share their prompt building, schema derivation, and validation
+entirely.
 """
 
 from __future__ import annotations
@@ -85,6 +87,12 @@ class LLMProvider(Protocol):
     @property
     def configured(self) -> bool:
         """Whether credentials/endpoint are present. Cheap, synchronous, no I/O."""
+        ...
+
+    @property
+    def health_detail(self) -> str | None:
+        """Why the most recent `health()` call failed, or `None` if it
+        succeeded (or never ran). No I/O — reflects only the last call."""
         ...
 
     async def classify(

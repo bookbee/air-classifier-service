@@ -81,10 +81,10 @@ def test_request_buckets_reach_the_latency_budget_ceiling() -> None:
 
 
 def test_record_request_labels_the_key_id_not_the_key() -> None:
-    labels = {"endpoint": "/v1/sentiment", "status": "200", "api_key_id": "key_01"}
+    labels = {"endpoint": "/v1/classify", "status": "200", "api_key_id": "key_01"}
     before = sample("air_classifier_requests_total", **labels)
 
-    metrics.record_request(endpoint="/v1/sentiment", status=200, api_key_id="key_01")
+    metrics.record_request(endpoint="/v1/classify", status=200, api_key_id="key_01")
 
     assert sample("air_classifier_requests_total", **labels) == before + 1
     payload, _ = metrics.render_latest()
@@ -92,11 +92,13 @@ def test_record_request_labels_the_key_id_not_the_key() -> None:
 
 
 def test_record_request_times_when_given_a_duration() -> None:
-    before = sample("air_classifier_request_duration_seconds_count", endpoint="/v1/reviews")
+    before = sample("air_classifier_request_duration_seconds_count", endpoint="/v1/classify")
 
-    metrics.record_request(endpoint="/v1/reviews", status=200, api_key_id="key_01", duration_s=0.25)
+    metrics.record_request(
+        endpoint="/v1/classify", status=200, api_key_id="key_01", duration_s=0.25
+    )
 
-    assert sample("air_classifier_request_duration_seconds_count", endpoint="/v1/reviews") == (
+    assert sample("air_classifier_request_duration_seconds_count", endpoint="/v1/classify") == (
         before + 1
     )
 

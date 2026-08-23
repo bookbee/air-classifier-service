@@ -5,6 +5,11 @@ fires: below the floor and only then, once and never twice, and with both calls'
 tokens folded into the verdict. The rest pins the degradation contract — a
 refusal, an outage, or a model that cannot follow the schema must all leave this
 tier as a ``TierError`` so the ladder falls back to a cheaper rung.
+
+This rung talks to a single scripted provider now, not a registry choosing among
+several — cross-vendor failover moved to air-llm's own routing alias. What is
+still this rung's own behaviour, and what these tests pin, is *whether* to ask
+for a second opinion, never *who* answers the first one.
 """
 
 from __future__ import annotations
@@ -15,14 +20,8 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, SecretStr
 
-from air_classifier.config import (
-    AnthropicSettings,
-    AppSettings,
-    ProvidersSettings,
-    Settings,
-)
-from air_classifier.constants import Label, Provider, ResourceKind
-from air_classifier.observability.cost import ModelPrice, override_prices, reset_price_table
+from air_classifier.config import AirLlmSettings, AppSettings, ResilienceSettings, Settings
+from air_classifier.constants import Label, Provider
 from air_classifier.pipeline.features import extract_features
 from air_classifier.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
 from air_classifier.pipeline.tiers.t3_cloud_llm import CloudLLMTier
@@ -32,7 +31,6 @@ from air_classifier.providers.base import (
     ProviderSchemaError,
     ProviderUnavailableError,
 )
-from air_classifier.providers.registry import ProviderRegistry
 from air_classifier.resilience.breaker import CircuitBreaker
 from air_classifier.resilience.bulkhead import Bulkhead
 from air_classifier.schemas.common import LanguageInfo, Options, SafetyReport
@@ -49,8 +47,8 @@ SONNET = "claude-sonnet-5"
 class _ScriptedProvider:
     """Replays a scripted list of results/exceptions and records every call."""
 
-    def __init__(self, name: Provider, outcomes: list[Any], *, healthy: bool = True) -> None:
-        self.name = name
+    def __init__(self, outcomes: list[Any], *, healthy: bool = True) -> None:
+        self.name: Provider = Provider.ANTHROPIC
         self._outcomes = list(outcomes)
         self.healthy = healthy
         self.calls: list[dict[str, Any]] = []
@@ -58,6 +56,10 @@ class _ScriptedProvider:
     @property
     def configured(self) -> bool:
         return True
+
+    @property
+    def health_detail(self) -> str | None:
+        return None if self.healthy else "stub unhealthy"
 
     async def health(self) -> bool:
         return self.healthy
@@ -123,13 +125,16 @@ def _result(
     )
 
 
-def _settings(**anthropic: Any) -> Settings:
+def _settings(**air_llm: Any) -> Settings:
+    fields: dict[str, Any] = {
+        "token": SecretStr("test-token"),
+        "cloud_model": HAIKU,
+        "arbiter_model": SONNET,
+    }
+    fields.update(air_llm)
     return Settings(
         app=AppSettings(env="test"),
-        providers=ProvidersSettings(
-            preference=[Provider.ANTHROPIC],
-            anthropic=AnthropicSettings(api_key=SecretStr("sk-ant"), **anthropic),
-        ),
+        air_llm=AirLlmSettings(**fields),
     )
 
 
@@ -142,7 +147,6 @@ def _ctx(
 ) -> TierContext:
     return TierContext(
         request_id="req_t3",
-        resource=ResourceKind.SENTIMENT,
         text=TEXT,
         original_length=len(TEXT),
         language=LanguageInfo(code="en", confidence=0.9),
@@ -157,22 +161,20 @@ def _ctx(
 def _tier(
     outcomes: list[Any],
     *,
-    breakers: dict[Provider, CircuitBreaker] | None = None,
+    breaker: CircuitBreaker | None = None,
     bulkhead: Bulkhead | None = None,
     healthy: bool = True,
-    **anthropic: Any,
+    **air_llm: Any,
 ) -> tuple[CloudLLMTier, _ScriptedProvider]:
-    settings = _settings(**anthropic)
-    provider = _ScriptedProvider(Provider.ANTHROPIC, outcomes, healthy=healthy)
-    registry = ProviderRegistry(settings, {Provider.ANTHROPIC: provider}, breakers or {})
-    return CloudLLMTier(settings, registry, bulkhead), provider
-
-
-@pytest.fixture(autouse=True)
-def _restore_prices() -> Any:
-    """Cost assertions here override the price table; put it back afterwards."""
-    yield
-    reset_price_table()
+    settings = _settings(**air_llm)
+    provider = _ScriptedProvider(outcomes, healthy=healthy)
+    tier = CloudLLMTier(
+        settings,
+        provider,
+        bulkhead=bulkhead,
+        breaker=breaker or CircuitBreaker("anthropic-test", threshold=5, cooldown_s=30.0),
+    )
+    return tier, provider
 
 
 # ── Happy path ────────────────────────────────────────────────────────────────
@@ -198,7 +200,7 @@ async def test_the_cached_prefix_and_the_schema_are_both_requested() -> None:
     call = provider.calls[0]
     assert call["cache_prefix"] is True
     assert call["output_model"] is LLMSentimentOutput
-    assert call["max_tokens"] == 1024
+    assert call["max_tokens"] == 2048
     # The volatile half carries the text; the cached half must not.
     assert TEXT in call["user_content"]
     assert TEXT not in call["system_prompt"]
@@ -215,7 +217,7 @@ async def test_usage_from_the_call_reaches_the_verdict() -> None:
     assert verdict.usage.model == HAIKU
 
 
-async def test_tier_reports_availability_from_the_registry() -> None:
+async def test_tier_reports_availability_from_the_provider() -> None:
     available, _ = _tier([])
     unavailable, _ = _tier([], healthy=False)
 
@@ -223,11 +225,19 @@ async def test_tier_reports_availability_from_the_registry() -> None:
     assert await unavailable.is_available() is False
 
 
+async def test_unavailable_reason_falls_through_to_the_providers_own_detail() -> None:
+    unavailable, _ = _tier([], healthy=False)
+
+    assert await unavailable.unavailable_reason() == "stub unhealthy"
+    available, _ = _tier([])
+    assert await available.unavailable_reason() is None
+
+
 async def test_every_language_is_supported_here() -> None:
     tier, _ = _tier([])
 
     assert tier.supports_language("ja") is True
-    assert tier.model_version == f"anthropic:{HAIKU}"
+    assert tier.model_version == HAIKU
 
 
 # ── Arbitration ───────────────────────────────────────────────────────────────
@@ -305,12 +315,6 @@ async def test_arbitration_can_be_switched_off() -> None:
 
 
 async def test_both_calls_are_billed_to_the_request() -> None:
-    override_prices(
-        {
-            HAIKU: ModelPrice.metered(input_per_mtok=1.0, output_per_mtok=5.0),
-            SONNET: ModelPrice.metered(input_per_mtok=3.0, output_per_mtok=15.0),
-        }
-    )
     tier, _ = _tier(
         [
             _result(confidence=0.4, model=HAIKU, tokens_in=100, tokens_out=20, cost_usd=0.001),
@@ -413,17 +417,10 @@ async def test_a_refusal_degrades_the_ladder_rather_than_failing_the_request() -
         await tier.analyse(_ctx())
 
 
-async def test_no_provider_available_degrades_the_ladder() -> None:
-    tier, _ = _tier([], healthy=False)
-
-    with pytest.raises(TierUnavailableError):
-        await tier.analyse(_ctx())
-
-
 async def test_an_open_breaker_degrades_the_ladder() -> None:
-    breaker = CircuitBreaker("anthropic", threshold=1, cooldown_s=60.0)
+    breaker = CircuitBreaker("anthropic-test", threshold=1, cooldown_s=60.0)
     await breaker.record_failure()
-    tier, provider = _tier([_result(confidence=0.9)], breakers={Provider.ANTHROPIC: breaker})
+    tier, provider = _tier([_result(confidence=0.9)], breaker=breaker)
 
     with pytest.raises(TierUnavailableError):
         await tier.analyse(_ctx())
@@ -452,3 +449,46 @@ async def test_a_full_bulkhead_degrades_the_ladder() -> None:
     async with bulkhead.acquire():
         with pytest.raises(TierUnavailableError):
             await tier.analyse(_ctx())
+
+
+async def test_the_default_bulkhead_is_self_built_and_actually_bounds_concurrency() -> None:
+    """main.py's build_ladder() passes no explicit bulkhead to this
+    constructor (mirroring how it has always called LocalLLMTier) — this rung
+    has to build its own from resilience settings or concurrency against the
+    metered cloud call goes unbounded, and `guarded()` fails open silently
+    when handed `bulkhead=None` rather than raising. Held open from the
+    outside exactly as the injected-bulkhead test above does, so what is
+    proven is that the self-built default is a real, functional `Bulkhead` —
+    not merely a non-``None`` attribute.
+    """
+    settings = Settings(
+        app=AppSettings(env="test"),
+        air_llm=AirLlmSettings(token=SecretStr("test-token")),
+        resilience=ResilienceSettings(llm_concurrency=1, bulkhead_acquire_timeout_s=0.02),
+    )
+    provider = _ScriptedProvider([_result(confidence=0.9)])
+    # No bulkhead kwarg at all — the exact call shape main.py uses.
+    tier = CloudLLMTier(settings, provider)
+
+    async with tier._bulkhead.acquire():
+        with pytest.raises(TierUnavailableError):
+            await tier.analyse(_ctx())
+
+
+# ── What /v1/capabilities advertises for this rung ────────────────────────────
+
+
+def test_capabilities_report_the_configured_cloud_model() -> None:
+    """`model_version` is just the configured alias/model now — no provider
+    preference order to resolve, since air-llm owns that choice."""
+    tier, _ = _tier([])
+
+    assert tier.model_version == HAIKU
+
+
+def test_capabilities_reflect_a_routing_alias_when_one_is_configured() -> None:
+    """The configured value may be an air-llm alias, not a bare model id — this
+    rung reports it verbatim either way."""
+    tier, _ = _tier([], cloud_model="classify-default")
+
+    assert tier.model_version == "classify-default"

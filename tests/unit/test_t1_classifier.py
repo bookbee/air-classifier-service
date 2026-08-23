@@ -17,7 +17,7 @@ from collections.abc import Mapping
 import pytest
 
 from air_classifier.config import ClassifierSettings, Settings
-from air_classifier.constants import Label, ResourceKind
+from air_classifier.constants import Label
 from air_classifier.constants import Tier as TierId
 from air_classifier.pipeline.features import extract_features
 from air_classifier.pipeline.tiers.base import Tier as TierProtocol
@@ -36,7 +36,6 @@ def make_context(text: str, *, language: str = "en") -> TierContext:
     """A context shaped the way the orchestrator assembles one."""
     return TierContext(
         request_id="req_test",
-        resource=ResourceKind.SENTIMENT,
         text=text,
         original_length=len(text),
         language=LanguageInfo(code=language, confidence=0.9),

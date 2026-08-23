@@ -40,7 +40,6 @@ from air_classifier.constants import HEADER_API_KEY, HEADER_IDEMPOTENCY_KEY
 from air_classifier.observability.logging import bind_request_context, get_logger
 from air_classifier.pipeline.orchestrator import Orchestrator
 from air_classifier.pipeline.tiers.base import Tier
-from air_classifier.providers.registry import ProviderRegistry
 from air_classifier.schemas.common import Options
 from air_classifier.security.api_keys import ApiKeyRecord, ApiKeyStore
 from air_classifier.security.quotas import RateLimiter, RateLimitResult
@@ -96,9 +95,6 @@ class AppState:
     api_keys: ApiKeyStore
     rate_limiter: RateLimiter
     orchestrator: Orchestrator
-    #: ``None`` when no cloud provider is configured — a local-only deployment
-    #: is a supported shape, not a misconfiguration.
-    registry: ProviderRegistry | None = None
     #: Every rung the app built, in ladder order. Readiness and
     #: ``/v1/capabilities`` need the tiers themselves, not just the orchestrator
     #: they were handed to.

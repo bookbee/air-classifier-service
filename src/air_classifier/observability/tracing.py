@@ -21,13 +21,13 @@ from air_classifier.config import Settings
 from air_classifier.observability.logging import get_logger
 
 try:  # The `otel` extra is optional; absence is a supported configuration.
-    from opentelemetry import trace as otel_trace  # type: ignore[import-not-found]
-    from opentelemetry.sdk.resources import Resource  # type: ignore[import-not-found]
-    from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import-not-found]
-    from opentelemetry.sdk.trace.export import (  # type: ignore[import-not-found]
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import (
         BatchSpanProcessor,
     )
-    from opentelemetry.sdk.trace.sampling import (  # type: ignore[import-not-found]
+    from opentelemetry.sdk.trace.sampling import (
         ParentBased,
         TraceIdRatioBased,
     )
@@ -125,7 +125,7 @@ def configure_tracing(settings: Settings) -> None:
 
     if settings.obs.otel_endpoint:
         try:
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore[import-not-found]
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
                 OTLPSpanExporter,
             )
         except ImportError:
@@ -183,7 +183,7 @@ def instrument_app(app: Any) -> None:
     if _tracer is None:
         return
     try:
-        from opentelemetry.instrumentation.fastapi import (  # type: ignore[import-not-found]
+        from opentelemetry.instrumentation.fastapi import (
             FastAPIInstrumentor,
         )
     except ImportError:

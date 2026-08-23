@@ -13,12 +13,11 @@ import time
 
 import pytest
 
-from air_classifier.config import Settings
-from air_classifier.constants import Label, ResourceKind, Tier
+from air_classifier.constants import Label, Tier
 from air_classifier.pipeline.features import extract_features
 from air_classifier.pipeline.tiers.base import TierContext
 from air_classifier.providers.prompts.loader import (
-    HAIKU_MIN_CACHEABLE_TOKENS,
+    CLOUD_MIN_CACHEABLE_TOKENS,
     compact_system_prompt,
     estimated_compact_tokens,
     estimated_system_tokens,
@@ -26,6 +25,7 @@ from air_classifier.providers.prompts.loader import (
     system_prompt,
     user_content,
 )
+from air_classifier.schemas.classify import MAX_TEXT_CHARS
 from air_classifier.schemas.common import (
     LanguageInfo,
     Options,
@@ -34,7 +34,6 @@ from air_classifier.schemas.common import (
     SentimentResult,
     TierUsage,
 )
-from air_classifier.schemas.requests import MAX_TEXT_CHARS
 from air_classifier.schemas.verdict import TierVerdict
 
 TEXT = "Great battery but the camera is awful."
@@ -43,7 +42,6 @@ TEXT = "Great battery but the camera is awful."
 def _ctx(
     *,
     text: str = TEXT,
-    resource: ResourceKind = ResourceKind.SENTIMENT,
     options: Options | None = None,
     safety: SafetyReport | None = None,
     resource_fields: dict[str, object] | None = None,
@@ -51,7 +49,6 @@ def _ctx(
 ) -> TierContext:
     return TierContext(
         request_id="req_test",
-        resource=resource,
         text=text,
         original_length=len(text),
         language=LanguageInfo(code="en", confidence=0.87),
@@ -78,17 +75,19 @@ def _verdict(tier: Tier, label: Label, confidence: float, *, succeeded: bool = T
 # ── The cache floor ───────────────────────────────────────────────────────────
 
 
-def test_system_prompt_clears_the_haiku_prompt_cache_floor() -> None:
+def test_system_prompt_clears_the_cloud_prompt_cache_floor() -> None:
     """Do not let this fall below 4096 tokens.
 
-    Anthropic's minimum cacheable prefix is 4096 tokens on Claude Haiku 4.5, our
-    default cloud model. Below it nothing errors — the cache simply never fills
-    and every request pays full input price forever, roughly a tenfold increase
-    on the cached portion of our cloud bill. Shortening `system.md` is therefore
-    a cost regression that no other test would catch.
+    4096 tokens is the minimum cacheable prefix on the provider currently
+    behind `air_llm.cloud_model`'s default rung. Below it nothing errors — the
+    cache simply never fills and every request pays full input price forever,
+    roughly a tenfold increase on the cached portion of the cloud bill.
+    Shortening `system.md` is therefore a cost regression that no other test
+    would catch. If air-llm's alias ever defaults to a provider with a
+    different floor, this number is the one to revisit.
     """
-    assert HAIKU_MIN_CACHEABLE_TOKENS == 4096
-    assert estimated_system_tokens() >= HAIKU_MIN_CACHEABLE_TOKENS
+    assert CLOUD_MIN_CACHEABLE_TOKENS == 4096
+    assert estimated_system_tokens() >= CLOUD_MIN_CACHEABLE_TOKENS
 
 
 # ── Byte stability of the prefix ──────────────────────────────────────────────
@@ -141,13 +140,13 @@ def test_user_content_is_deterministic_for_the_same_context() -> None:
     assert user_content(ctx) == user_content(ctx)
 
 
-def test_user_content_framing_varies_by_resource_kind() -> None:
-    rendered = {kind: user_content(_ctx(resource=kind)) for kind in ResourceKind}
+def test_user_content_carries_the_task_framing() -> None:
+    content = user_content(_ctx())
 
-    assert len(set(rendered.values())) == len(ResourceKind)
-    assert "product review" in rendered[ResourceKind.REVIEWS]
-    assert "product team" in rendered[ResourceKind.FEEDBACK]
-    assert "no domain" in rendered[ResourceKind.SENTIMENT]
+    assert "distinct facets" in content
+    assert "tone" in content
+    assert "topics" in content
+    assert "intent" in content
 
 
 def test_user_content_reports_the_detected_language() -> None:
@@ -155,16 +154,14 @@ def test_user_content_reports_the_detected_language() -> None:
 
 
 def test_user_content_normalises_a_review_rating() -> None:
-    content = user_content(
-        _ctx(resource=ResourceKind.REVIEWS, resource_fields={"rating": 4, "rating_scale_max": 5})
-    )
+    content = user_content(_ctx(resource_fields={"rating": 4, "rating_scale_max": 5}))
 
     assert "4 of 5" in content
     assert "+0.60" in content
 
 
 def test_user_content_omits_the_rating_line_when_there_is_no_rating() -> None:
-    content = user_content(_ctx(resource=ResourceKind.REVIEWS))
+    content = user_content(_ctx())
 
     assert "Author's rating" not in content
 
@@ -172,7 +169,6 @@ def test_user_content_omits_the_rating_line_when_there_is_no_rating() -> None:
 def test_user_content_includes_feedback_channel_and_subject() -> None:
     content = user_content(
         _ctx(
-            resource=ResourceKind.FEEDBACK,
             resource_fields={
                 "channel": "support",
                 "subject": "Cannot log in",
@@ -248,8 +244,9 @@ def test_repair_instruction_bounds_a_pathological_error_string() -> None:
 # argument is worth nothing on a locally served model, which re-reads the whole
 # prefix on every call and has no cache to amortise it against. Feeding the long
 # prefix to Ollama measured ~9.9s against ~1.5s for the compact one — and since
-# it was also 2.2x num_ctx, Ollama silently truncated it, so we paid the latency
-# and lost the rubric at the same time. Nothing logged, nothing raised.
+# it was also 2.2x the context window Ollama was configured with, it was
+# silently truncated, so we paid the latency and lost the rubric at the same
+# time. Nothing logged, nothing raised.
 
 
 def test_the_local_prompt_is_far_smaller_than_the_remote_one() -> None:
@@ -258,19 +255,27 @@ def test_the_local_prompt_is_far_smaller_than_the_remote_one() -> None:
 
 
 def test_the_local_prompt_leaves_room_for_the_longest_input_we_accept() -> None:
-    """The compact prefix must fit num_ctx with the largest allowed text beside it.
+    """The compact prefix must fit the local model's context window with the
+    largest allowed text beside it.
 
-    Undersizing num_ctx does not error — Ollama truncates the prompt and the
-    model loses its instructions. This test is the only thing standing between a
-    prompt edit and that silent failure.
+    That window is air-llm's own ``ollama`` config now, not a setting this
+    service can read — the cutover to air-llm moved Ollama's connection
+    details, including ``num_ctx``, out of this codebase entirely. What
+    remains checkable from here is the assumption the split prompt was sized
+    against: air-llm's Ollama config defaulted to 8192 at cutover, and
+    undersizing it does not error on the Ollama side either — the prompt is
+    truncated and the model silently loses its instructions. If this
+    assertion ever fails, the fix is not in this file: either the compact
+    prompt grew, or the two services' assumptions about the context window
+    have drifted and need reconciling against air-llm's actual config.
     """
-    settings = Settings()
     longest_input_tokens = MAX_TEXT_CHARS / 3.7
     needed = estimated_compact_tokens() + longest_input_tokens
-    assert settings.providers.ollama.num_ctx >= needed, (
-        f"num_ctx={settings.providers.ollama.num_ctx} cannot hold the compact prompt "
+    assumed_num_ctx = 8192
+    assert assumed_num_ctx >= needed, (
+        f"num_ctx={assumed_num_ctx} cannot hold the compact prompt "
         f"({estimated_compact_tokens()} tokens) plus a {MAX_TEXT_CHARS}-char input "
-        f"(~{longest_input_tokens:.0f} tokens); Ollama will truncate silently"
+        f"(~{longest_input_tokens:.0f} tokens); the local model will truncate silently"
     )
 
 

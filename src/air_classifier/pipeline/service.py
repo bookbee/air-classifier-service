@@ -2,22 +2,22 @@
 
 Everything above this module speaks HTTP; everything below it speaks
 :class:`~air_classifier.pipeline.tiers.base.TierContext`. Keeping the join in one
-place buys three things that are easy to lose if the routers do this work
-themselves:
+place buys three things that are easy to lose if the route handler did this
+work itself:
 
 * **Redaction happens exactly once, before anything sees the text.** The tiers
-  receive :attr:`TierContext.text`, and there is no other way in. A router that
+  receive :attr:`TierContext.text`, and there is no other way in. A handler that
   built its own context could forget, and nothing would fail loudly.
 * **One preprocessing order, one cache key.** Normalise, redact, detect, score,
-  extract — in that sequence — so two identical requests arriving at different
-  endpoints agree on what "the text" is and therefore on their cache key.
+  extract — in that sequence — so two identical requests agree on what "the
+  text" is and therefore on their cache key.
 * **Per-item isolation is a property of the batch, not of the caller.**
   :meth:`AnalysisService.analyse_batch` converts one item's failure into a
   problem in that slot; the other ninety-nine still return answers.
 
-The response shaping lives in module-level ``_shape_*`` functions rather than
-methods so they can be exercised against a hand-built envelope, with no
-orchestrator and no cache in the picture.
+The response shaping lives in a module-level function rather than a method so
+it can be exercised against a hand-built ladder result, with no orchestrator
+and no cache in the picture.
 """
 
 from __future__ import annotations
@@ -27,18 +27,22 @@ import re
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, overload
+from typing import Any, Final
 
 from pydantic import ValidationError
 
+from air_classifier import __version__
 from air_classifier.cache.base import CacheBackend, verdict_cache_key
 from air_classifier.config import Settings
 from air_classifier.constants import (
     Actionability,
     EscalationReason,
+    Intent,
     Label,
     RatingAgreement,
-    ResourceKind,
+    RoutingPriority,
+    Tone,
+    Topic,
     Urgency,
 )
 from air_classifier.observability.logging import get_logger
@@ -55,9 +59,18 @@ from air_classifier.preprocess.language import detect_language
 from air_classifier.preprocess.lexicon import score_text
 from air_classifier.preprocess.normalize import normalize
 from air_classifier.preprocess.pii import redact
+from air_classifier.schemas.classify import (
+    MAX_TEXT_CHARS,
+    ClassificationResponse,
+    ClassifyBatchItem,
+    ClassifyRequest,
+    ModelInfo,
+    RoutingInfo,
+)
 from air_classifier.schemas.common import (
     Aspect,
     ComplexityFeatures,
+    LabeledScore,
     LanguageInfo,
     Options,
     RatingConsistency,
@@ -66,20 +79,6 @@ from air_classifier.schemas.common import (
     SentimentResult,
 )
 from air_classifier.schemas.errors import FieldError, ProblemDetail
-from air_classifier.schemas.requests import (
-    MAX_TEXT_CHARS,
-    BaseAnalysisRequest,
-    FeedbackRequest,
-    ReviewRequest,
-    SentimentRequest,
-)
-from air_classifier.schemas.responses import (
-    BaseAnalysisResponse,
-    BatchItemResult,
-    FeedbackResponse,
-    ReviewResponse,
-    SentimentResponse,
-)
 from air_classifier.schemas.verdict import OrchestrationResult
 
 __all__ = ["AnalysisService"]
@@ -87,7 +86,7 @@ __all__ = ["AnalysisService"]
 _log = get_logger(__name__)
 
 
-# ── Heuristic tables (feedback triage) ────────────────────────────────────────
+# ── Heuristic tables ─────────────────────────────────────────────────────────
 
 #: Ladder used by the urgency heuristic. Index arithmetic below relies on it
 #: being ordered least-urgent first.
@@ -98,7 +97,7 @@ _URGENCY_LADDER: Final[tuple[Urgency, ...]] = (
     Urgency.CRITICAL,
 )
 
-#: Feedback that means someone is losing money, data, or access right now.
+#: Text that means someone is losing money, data, or access right now.
 _CRITICAL_CUES: Final[frozenset[str]] = frozenset(
     {
         "breach",
@@ -120,7 +119,7 @@ _CRITICAL_CUES: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Feedback that needs a person today, but is not an emergency.
+#: Text that needs a person today, but is not an emergency.
 _HIGH_CUES: Final[frozenset[str]] = frozenset(
     {
         "asap",
@@ -143,7 +142,7 @@ _HIGH_CUES: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Feedback worth a ticket, not a page.
+#: Text worth a ticket, not a page.
 _MEDIUM_CUES: Final[frozenset[str]] = frozenset(
     {
         "annoying",
@@ -159,15 +158,20 @@ _MEDIUM_CUES: Final[frozenset[str]] = frozenset(
 )
 
 #: Channels where a human already chose to reach out — the effort itself is a
-#: signal. A survey response is the opposite: it was solicited.
+#: signal. A survey response is the opposite: it was solicited. Read from
+#: `ClassifyRequest.channel` when the caller supplied one; most callers do not,
+#: and an absent channel simply skips this adjustment.
 _ESCALATING_CHANNELS: Final[frozenset[str]] = frozenset({"call", "chat", "phone", "support"})
 _DAMPENING_CHANNELS: Final[frozenset[str]] = frozenset({"nps", "research", "survey"})
 
 #: Polarity at or below which a negative verdict starts one rung up.
 _STRONG_NEGATIVE: Final[float] = -0.7
 
-#: Keyword families mapped to the queue that owns them. Order is the tie-break,
-#: so the families that cost most to route wrongly come first.
+#: Keyword families mapped to the queue that owns them, and the fallback
+#: `routing.queue` uses when neither `intent` nor `topics` narrowed it down
+#: (see `_derive_routing`) — which happens exactly when the ladder stopped
+#: below an LLM tier. Order is the tie-break, so the families that cost most
+#: to route wrongly come first.
 _ROUTE_FAMILIES: Final[tuple[tuple[str, frozenset[str]], ...]] = (
     (
         "security",
@@ -262,6 +266,57 @@ _ROUTE_RES: Final[tuple[tuple[str, re.Pattern[str]], ...]] = tuple(
     (name, _compile_cues(terms)) for name, terms in _ROUTE_FAMILIES
 )
 
+#: `routing.queue`, preferred over the keyword match above whenever `intent`
+#: or `topics` exist: they are a direct answer to "what team owns this",
+#: where the keyword tables only ever approximate it from prose. Own naming
+#: (underscores) rather than `_ROUTE_FAMILIES`'s hyphenated queue names —
+#: unrelated tables serving the same field, not a shared vocabulary.
+_INTENT_QUEUES: Final[dict[Intent, str]] = {
+    Intent.COMPLAINT: "customer_support",
+    Intent.INFORMATION: "customer_support",
+    Intent.REFUND_REQUEST: "billing",
+    Intent.RETURN_REQUEST: "returns",
+    Intent.ORDER_TRACKING: "shipping",
+    Intent.REPLACEMENT_REQUEST: "returns",
+    Intent.CANCELLATION: "billing",
+    Intent.RECOMMENDATION: "customer_support",
+    Intent.PRAISE: "customer_support",
+}
+
+_TOPIC_QUEUES: Final[dict[Topic, str]] = {
+    Topic.DELIVERY: "shipping",
+    Topic.PAYMENT: "billing",
+    Topic.PRODUCT_QUALITY: "product_quality",
+    Topic.RETURN: "returns",
+    Topic.REFUND: "billing",
+    Topic.PRICING: "billing",
+}
+
+#: Direct rank mapping — see `RoutingPriority`'s docstring for why this is not
+#: a second judgement call.
+_URGENCY_PRIORITY: Final[dict[Urgency, RoutingPriority]] = {
+    Urgency.CRITICAL: RoutingPriority.P1,
+    Urgency.HIGH: RoutingPriority.P2,
+    Urgency.MEDIUM: RoutingPriority.P3,
+    Urgency.LOW: RoutingPriority.P4,
+}
+
+#: Intents that imply someone is waiting on an outcome a heuristic cannot
+#: deliver — money moving, an order changing, a relationship already strained.
+_REQUIRES_HUMAN_INTENTS: Final[frozenset[Intent]] = frozenset(
+    {
+        Intent.COMPLAINT,
+        Intent.REFUND_REQUEST,
+        Intent.RETURN_REQUEST,
+        Intent.REPLACEMENT_REQUEST,
+        Intent.CANCELLATION,
+    }
+)
+
+_REQUIRES_HUMAN_TONES: Final[frozenset[Tone]] = frozenset(
+    {Tone.ANGRY, Tone.FRUSTRATED, Tone.ANXIOUS}
+)
+
 
 # ── Preprocessing result ──────────────────────────────────────────────────────
 
@@ -297,44 +352,13 @@ class AnalysisService:
 
     # ── Single ────────────────────────────────────────────────────────────────
 
-    @overload
     async def analyse(
         self,
-        request: SentimentRequest,
+        request: ClassifyRequest,
         *,
-        resource: ResourceKind,
         request_id: str,
         options: Options,
-    ) -> SentimentResponse: ...
-
-    @overload
-    async def analyse(
-        self,
-        request: FeedbackRequest,
-        *,
-        resource: ResourceKind,
-        request_id: str,
-        options: Options,
-    ) -> FeedbackResponse: ...
-
-    @overload
-    async def analyse(
-        self,
-        request: ReviewRequest,
-        *,
-        resource: ResourceKind,
-        request_id: str,
-        options: Options,
-    ) -> ReviewResponse: ...
-
-    async def analyse(
-        self,
-        request: BaseAnalysisRequest,
-        *,
-        resource: ResourceKind,
-        request_id: str,
-        options: Options,
-    ) -> BaseAnalysisResponse:
+    ) -> ClassificationResponse:
         """Preprocess, consult the cache, climb the ladder, shape the answer.
 
         ``options`` is passed separately from ``request.options`` because the API
@@ -345,25 +369,23 @@ class AnalysisService:
         that is the service's only path to a 5xx.
         """
         started = time.perf_counter()
-        prepared = self._prepare(request, resource=resource, options=options)
+        prepared = self._prepare(request, options=options)
 
         if prepared.cache_key is not None:
             hit = await self._cached(prepared.cache_key)
             if hit is not None:
-                return self._shape(
+                return _shape(
                     hit,
-                    request=request,
-                    resource=resource,
                     request_id=request_id,
-                    options=options,
                     prepared=prepared,
+                    metadata=request.metadata,
+                    include_trace=options.include_trace,
                     latency_ms=(time.perf_counter() - started) * 1000.0,
                     cached=True,
                 )
 
         ctx = TierContext(
             request_id=request_id,
-            resource=resource,
             text=prepared.text,
             original_length=prepared.original_length,
             language=prepared.language,
@@ -380,70 +402,44 @@ class AnalysisService:
 
         result = await self._orchestrator.run(ctx)
         if result.degraded:
-            record_degraded(EscalationReason.TIER_FAILED)
+            # Two distinct causes share the one `degraded` flag (orchestrator.py's
+            # module docstring): an outright tier failure, or the ladder wanting
+            # to climb with nothing available to climb to. Report whichever
+            # actually happened rather than assuming the former — a dashboard
+            # reading every degraded response as "a tier failed" would send
+            # DevOps chasing an error that, for a capacity gap, was never raised.
+            any_tier_failed = any(not step.succeeded for step in result.steps)
+            reason = (
+                EscalationReason.TIER_FAILED
+                if any_tier_failed
+                else EscalationReason.NEXT_TIER_UNAVAILABLE
+            )
+            record_degraded(reason)
 
         if prepared.cache_key is not None:
             await self._store(prepared.cache_key, result)
 
-        return self._shape(
+        return _shape(
             result,
-            request=request,
-            resource=resource,
             request_id=request_id,
-            options=options,
             prepared=prepared,
+            metadata=request.metadata,
+            include_trace=options.include_trace,
             latency_ms=(time.perf_counter() - started) * 1000.0,
             cached=False,
         )
 
     # ── Batch ─────────────────────────────────────────────────────────────────
 
-    @overload
     async def analyse_batch(
         self,
-        items: Sequence[SentimentRequest],
+        items: Sequence[ClassifyRequest],
         *,
-        resource: ResourceKind,
-        request_id: str,
-        options: Options | None = ...,
-        clamp: Callable[[Options], Options] | None = ...,
-        instance: str | None = ...,
-    ) -> list[BatchItemResult[SentimentResponse]]: ...
-
-    @overload
-    async def analyse_batch(
-        self,
-        items: Sequence[FeedbackRequest],
-        *,
-        resource: ResourceKind,
-        request_id: str,
-        options: Options | None = ...,
-        clamp: Callable[[Options], Options] | None = ...,
-        instance: str | None = ...,
-    ) -> list[BatchItemResult[FeedbackResponse]]: ...
-
-    @overload
-    async def analyse_batch(
-        self,
-        items: Sequence[ReviewRequest],
-        *,
-        resource: ResourceKind,
-        request_id: str,
-        options: Options | None = ...,
-        clamp: Callable[[Options], Options] | None = ...,
-        instance: str | None = ...,
-    ) -> list[BatchItemResult[ReviewResponse]]: ...
-
-    async def analyse_batch(
-        self,
-        items: Sequence[BaseAnalysisRequest],
-        *,
-        resource: ResourceKind,
         request_id: str,
         options: Options | None = None,
         clamp: Callable[[Options], Options] | None = None,
         instance: str | None = None,
-    ) -> list[BatchItemResult[Any]]:
+    ) -> list[ClassifyBatchItem]:
         """Analyse `items` concurrently, isolating each one's failures.
 
         ``options`` is the batch-level default; an item carrying its own wins.
@@ -455,10 +451,9 @@ class AnalysisService:
         batch must not open a thousand simultaneous LLM calls and take the
         provider — and every other caller — down with it.
         """
-        item_model = _BATCH_ITEM_MODELS[resource]
         semaphore = asyncio.Semaphore(self._settings.app.batch_concurrency)
 
-        async def run(index: int, item: BaseAnalysisRequest) -> BatchItemResult[Any]:
+        async def run(index: int, item: ClassifyRequest) -> ClassifyBatchItem:
             # `clamp` is inside the guard as well: a policy refusal on one item's
             # own options is that item's failure, not the batch's.
             try:
@@ -466,33 +461,24 @@ class AnalysisService:
                 if clamp is not None:
                     effective = clamp(effective)
                 async with semaphore:
-                    response = await self.analyse(  # type: ignore[call-overload]
-                        item, resource=resource, request_id=request_id, options=effective
+                    response = await self.analyse(
+                        item, request_id=request_id, options=effective
                     )
             except Exception as exc:
-                return item_model(
+                return ClassifyBatchItem(
                     index=index,
                     ok=False,
                     error=self._problem_for(
                         exc, index=index, request_id=request_id, instance=instance
                     ),
                 )
-            return item_model(index=index, ok=True, result=response)
+            return ClassifyBatchItem(index=index, ok=True, result=response)
 
-        results: list[BatchItemResult[Any]] = list(
-            await asyncio.gather(*(run(i, item) for i, item in enumerate(items)))
-        )
-        return results
+        return list(await asyncio.gather(*(run(i, item) for i, item in enumerate(items))))
 
     # ── Internals ─────────────────────────────────────────────────────────────
 
-    def _prepare(
-        self,
-        request: BaseAnalysisRequest,
-        *,
-        resource: ResourceKind,
-        options: Options,
-    ) -> _Prepared:
+    def _prepare(self, request: ClassifyRequest, *, options: Options) -> _Prepared:
         """Normalise, redact, and derive every signal the ladder needs.
 
         The redaction step sits here, above the orchestrator, so that no tier can
@@ -521,7 +507,6 @@ class AnalysisService:
         if self._cache is not None and self._settings.cache.ttl_seconds > 0:
             cache_key = verdict_cache_key(
                 prefix=self._settings.cache.key_prefix,
-                resource=resource,
                 text=text,
                 options=options,
                 resource_fields=resource_fields,
@@ -576,47 +561,6 @@ class AnalysisService:
             return
         await self._cache.set(key, result.model_dump_json(), self._settings.cache.ttl_seconds)
         record_cache_event(CacheEvent.STORE)
-
-    def _shape(
-        self,
-        result: OrchestrationResult,
-        *,
-        request: BaseAnalysisRequest,
-        resource: ResourceKind,
-        request_id: str,
-        options: Options,
-        prepared: _Prepared,
-        latency_ms: float,
-        cached: bool,
-    ) -> BaseAnalysisResponse:
-        """Build the resource's response from a ladder result."""
-        base = _envelope(
-            result,
-            request_id=request_id,
-            language=prepared.language,
-            safety=prepared.safety,
-            metadata=request.metadata,
-            include_trace=options.include_trace,
-            latency_ms=latency_ms,
-            cached=cached,
-        )
-
-        if resource is ResourceKind.FEEDBACK:
-            channel = prepared.resource_fields.get("channel")
-            return _shape_feedback(
-                base,
-                text=prepared.text,
-                channel=channel if isinstance(channel, str) else None,
-            )
-        if resource is ResourceKind.REVIEWS:
-            rating = prepared.resource_fields.get("rating")
-            scale = prepared.resource_fields.get("rating_scale_max")
-            return _shape_review(
-                base,
-                rating=float(rating) if isinstance(rating, int | float) else None,
-                rating_scale_max=float(scale) if isinstance(scale, int | float) else 5.0,
-            )
-        return _shape_sentiment(base)
 
     def _problem_for(
         self,
@@ -684,14 +628,7 @@ class AnalysisService:
         )
 
 
-_BATCH_ITEM_MODELS: Final[dict[ResourceKind, type[BatchItemResult[Any]]]] = {
-    ResourceKind.SENTIMENT: BatchItemResult[SentimentResponse],
-    ResourceKind.FEEDBACK: BatchItemResult[FeedbackResponse],
-    ResourceKind.REVIEWS: BatchItemResult[ReviewResponse],
-}
-
-
-def _effective_options(item: BaseAnalysisRequest, fallback: Options | None) -> Options:
+def _effective_options(item: ClassifyRequest, fallback: Options | None) -> Options:
     """The item's own options when it supplied any, else the batch default.
 
     ``model_fields_set`` rather than a truthiness check, because an item that
@@ -702,55 +639,96 @@ def _effective_options(item: BaseAnalysisRequest, fallback: Options | None) -> O
     return fallback
 
 
-def _resource_fields(request: BaseAnalysisRequest) -> dict[str, Any]:
-    """Flatten the resource-specific inputs the tiers and prompts read.
+def _resource_fields(request: ClassifyRequest) -> dict[str, Any]:
+    """Flatten the caller's optional fields for the tiers and prompts to read.
 
     Keys match what ``providers/prompts/loader.py`` and ``t0_rules.py`` look up;
     they are part of the internal contract, not free-form.
     """
-    if isinstance(request, FeedbackRequest):
-        return {
-            "channel": request.channel,
-            "user_segment": request.user_segment,
-            "subject": request.subject,
-        }
-    if isinstance(request, ReviewRequest):
-        return {
-            "rating": request.rating,
-            "rating_scale_max": request.rating_scale_max,
-            "product_id": request.product_id,
-            "verified_purchase": request.verified_purchase,
-            "title": request.title,
-        }
-    return {}
+    return {
+        "channel": request.channel,
+        "user_segment": request.user_segment,
+        "subject": request.subject,
+        "rating": request.rating,
+        "rating_scale_max": request.rating_scale_max,
+        "product_id": request.product_id,
+        "verified_purchase": request.verified_purchase,
+        "title": request.title,
+    }
 
 
-def _envelope(
+def _shape(
     result: OrchestrationResult,
     *,
     request_id: str,
-    language: LanguageInfo,
-    safety: SafetyReport,
+    prepared: _Prepared,
     metadata: dict[str, Any],
     include_trace: bool,
     latency_ms: float,
     cached: bool,
-) -> BaseAnalysisResponse:
-    """The block every resource returns, whoever answered."""
+) -> ClassificationResponse:
+    """The verdict, in full — see schemas/classify.py.
+
+    `tone`, `intent` and each entry of `topics` come straight off the deciding
+    verdict: present only when an LLM tier answered and was asked to fill
+    them, absent otherwise (`providers/prompts/loader.py`). `urgency`,
+    `actionability`, `requires_human` and `routing` are heuristics computed
+    here regardless of which rung decided — always present, and explicitly
+    not a model prediction. `rating_consistency` is `None` unless the caller
+    supplied a `rating`.
+    """
     best = result.best
     total = result.total_usage
-    return BaseAnalysisResponse(
+    fields = prepared.resource_fields
+    channel = fields.get("channel")
+    channel = channel if isinstance(channel, str) else None
+
+    urgency_label = _derive_urgency(sentiment=best.result, text=prepared.text, channel=channel)
+    routing = _derive_routing(
+        text=prepared.text,
+        aspects=best.aspects,
+        intent=best.intent,
+        topics=best.topics,
+        urgency=urgency_label,
+    )
+    requires_human = _derive_requires_human(
+        urgency=urgency_label,
+        intent=best.intent.label if best.intent is not None else None,
+        tone=best.tone.label if best.tone is not None else None,
+    )
+    actionability = _derive_actionability(
+        sentiment=best.result,
+        text=prepared.text,
+        urgency=urgency_label,
+        aspects=best.aspects,
+    )
+
+    return ClassificationResponse(
         request_id=request_id,
         sentiment=best.result,
-        emotions=list(best.emotions),
+        tone=best.tone,
+        # Confidence 1.0: a deterministic rule fired, not a probability estimate.
+        urgency=LabeledScore(label=urgency_label, confidence=1.0),
+        topics=list(best.topics),
+        intent=best.intent,
+        routing=routing,
+        requires_human=requires_human,
+        actionability=actionability,
         aspects=list(best.aspects),
-        language=language,
+        rating_consistency=_rating_consistency(
+            rating=_as_float(fields.get("rating")),
+            rating_scale_max=_as_float(fields.get("rating_scale_max")) or 5.0,
+            polarity=best.result.polarity,
+        ),
+        emotions=list(best.emotions),
+        language=prepared.language,
+        model=ModelInfo(name=best.model_version, version=__version__),
         decided_by=best.tier,
         degraded=result.degraded,
         # Suppressible because the trace is diagnostic weight most callers do
         # not want on every response — never because it would reveal anything.
         escalation_trace=list(result.steps) if include_trace else [],
-        safety=safety,
+        safety=prepared.safety,
         usage=RequestUsage(
             tiers_run=len(result.verdicts),
             tokens_in=total.tokens_in,
@@ -765,69 +743,26 @@ def _envelope(
     )
 
 
-# ── Per-resource shaping ──────────────────────────────────────────────────────
-
-
-def _shape_sentiment(base: BaseAnalysisResponse) -> SentimentResponse:
-    """Generic text: the envelope is the whole answer."""
-    return SentimentResponse(**base.model_dump())
-
-
-def _shape_feedback(
-    base: BaseAnalysisResponse,
-    *,
-    text: str,
-    channel: str | None,
-) -> FeedbackResponse:
-    """Feedback, plus triage signals derived here rather than by a model.
-
-    **``urgency``, ``actionability`` and ``suggested_route`` are heuristics
-    computed by this function.** No tier asserts them and no LLM was asked for
-    them: the structured-output contract in ``schemas/verdict.py`` carries
-    neither field. They are a deterministic reading of the verdict's polarity
-    and label, a fixed cue vocabulary, and the feedback ``channel`` — useful for
-    ordering a queue, and not evidence of anything. Treat a disagreement between
-    these fields and a human triager as a bug in the tables above, not as a
-    model error.
-    """
-    urgency = _derive_urgency(sentiment=base.sentiment, text=text, channel=channel)
-    return FeedbackResponse(
-        **base.model_dump(),
-        urgency=urgency,
-        actionability=_derive_actionability(
-            sentiment=base.sentiment, text=text, urgency=urgency, aspects=base.aspects
-        ),
-        suggested_route=_derive_route(text=text, aspects=base.aspects),
-    )
-
-
-def _shape_review(
-    base: BaseAnalysisResponse,
-    *,
-    rating: float | None,
-    rating_scale_max: float,
-) -> ReviewResponse:
-    """A review, plus the prose-versus-stars cross-check when stars were given."""
-    return ReviewResponse(
-        **base.model_dump(),
-        rating_consistency=_rating_consistency(
-            rating=rating,
-            rating_scale_max=rating_scale_max,
-            polarity=base.sentiment.polarity,
-        ),
-    )
+def _as_float(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) else None
 
 
 # ── Derivations ───────────────────────────────────────────────────────────────
+#
+# Everything below is a heuristic, not a model prediction: a deterministic
+# reading of the verdict's polarity and label, a fixed cue vocabulary, and
+# whatever optional fields the caller supplied. No tier asserts these and no
+# LLM is asked for them — the structured-output contract in schemas/verdict.py
+# carries none of them. Treat a disagreement between these functions and a
+# human triager as a bug in the tables below, not as a model error.
 
 
 def _derive_urgency(*, sentiment: SentimentResult, text: str, channel: str | None) -> Urgency:
-    """How soon this feedback wants a human. **A heuristic, not a prediction.**
+    """How soon this text wants a human.
 
-    Starts from the verdict — negative feedback outranks positive — then lifts
-    on lexical cues and nudges on the channel. Cues dominate polarity on
-    purpose: "the checkout is down" delivered calmly still means the checkout
-    is down.
+    Starts from the verdict — negative outranks positive — then lifts on
+    lexical cues and nudges on the channel. Cues dominate polarity on purpose:
+    "the checkout is down" delivered calmly still means the checkout is down.
     """
     level = 0
     if sentiment.label is Label.NEGATIVE:
@@ -858,10 +793,10 @@ def _derive_actionability(
     urgency: Urgency,
     aspects: Sequence[Aspect],
 ) -> Actionability:
-    """Whether this feedback implies work. **A heuristic, not a prediction.**
+    """Whether this text implies work for someone.
 
-    ``BLOCKING`` is reserved for feedback that says someone is stuck; praise
-    with named facets is ``INFORMATIONAL`` because it tells a team something
+    ``BLOCKING`` is reserved for text that says someone is stuck; praise with
+    named facets is ``INFORMATIONAL`` because it tells a team something
     without asking for anything.
     """
     if sentiment.label is Label.UNKNOWN:
@@ -881,12 +816,13 @@ def _derive_actionability(
 
 
 def _derive_route(*, text: str, aspects: Sequence[Aspect]) -> str | None:
-    """The queue this feedback probably belongs to, or None.
+    """The queue this text probably belongs to, from keywords alone, or None.
 
-    **A heuristic, not a prediction.** Aspect names count alongside the text
-    because a tier that named "delivery" as a facet has done the same matching
-    work with more context than these tables have. None rather than a default
-    queue: a wrong route costs more than an unrouted item.
+    The fallback `_derive_routing` uses when neither `intent` nor `topics`
+    narrowed it down. Aspect names count alongside the text because a tier
+    that named "delivery" as a facet has done the same matching work with
+    more context than these tables have. None rather than a default queue: a
+    wrong route costs more than an unrouted item.
     """
     haystack = " ".join([text, *(aspect.name for aspect in aspects)])
     best_name: str | None = None
@@ -899,13 +835,54 @@ def _derive_route(*, text: str, aspects: Sequence[Aspect]) -> str | None:
     return best_name
 
 
+def _derive_routing(
+    *,
+    text: str,
+    aspects: Sequence[Aspect],
+    intent: LabeledScore[Intent] | None,
+    topics: Sequence[LabeledScore[Topic]],
+    urgency: Urgency,
+) -> RoutingInfo:
+    """Queue and priority. Both heuristic, both deterministic.
+
+    `queue` prefers `intent` — the most decisive "what do they want" signal —
+    then the highest-confidence `topic`, and only falls back to the keyword
+    match in `_derive_route` when neither exists, which happens exactly when
+    the ladder stopped below an LLM tier. `priority` is `urgency` read through
+    `_URGENCY_PRIORITY`.
+    """
+    queue: str | None = None
+    if intent is not None:
+        queue = _INTENT_QUEUES.get(intent.label)
+    if queue is None and topics:
+        best_topic = max(topics, key=lambda t: t.confidence)
+        queue = _TOPIC_QUEUES.get(best_topic.label)
+    if queue is None:
+        queue = _derive_route(text=text, aspects=aspects)
+    return RoutingInfo(queue=queue, priority=_URGENCY_PRIORITY[urgency])
+
+
+def _derive_requires_human(*, urgency: Urgency, intent: Intent | None, tone: Tone | None) -> bool:
+    """Whether a person needs to look at this.
+
+    High or critical urgency is sufficient on its own; failing that, an intent
+    that implies an outcome a rule cannot deliver, or a tone that says the
+    author is already past patience.
+    """
+    if urgency in (Urgency.HIGH, Urgency.CRITICAL):
+        return True
+    if intent is not None and intent in _REQUIRES_HUMAN_INTENTS:
+        return True
+    return tone is not None and tone in _REQUIRES_HUMAN_TONES
+
+
 def _rating_consistency(
     *,
     rating: float | None,
     rating_scale_max: float,
     polarity: float,
 ) -> RatingConsistency | None:
-    """Compare prose polarity against the stars the author gave.
+    """Compare prose polarity against the stars the caller gave, if any.
 
     Both are put on -1..+1 and subtracted. A positive delta means the prose is
     warmer than the rating — the classic "4 stars, glowing review" — and a

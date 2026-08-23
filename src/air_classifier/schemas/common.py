@@ -54,6 +54,21 @@ class Emotion(BaseModel):
     score: float = Field(ge=0.0, le=1.0)
 
 
+class LabeledScore[T](BaseModel):
+    """A closed-vocabulary label with the confidence behind it.
+
+    The shape `/v1/classify`'s `tone`, `urgency`, `intent` and each entry of
+    `topics` all share — `T` is `Tone`, `Urgency`, `Intent` or `Topic`
+    respectively (see `constants.py`). One generic rather than four near-
+    identical models, the same reasoning as `schemas/classify.py`'s
+    `ClassifyBatchItem`/`ClassifyBatchResponse` share one shape rather than
+    repeating it per field.
+    """
+
+    label: T
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 class RatingConsistency(BaseModel):
     """Whether a review's prose matches the stars it carries."""
 
@@ -187,7 +202,9 @@ class Options(BaseModel):
     include_trace: bool = True
     redact_pii: bool = True
     aspects: list[str] | None = Field(
-        default=None, max_length=20, description="Aspects to score explicitly (reviews)."
+        default=None,
+        max_length=20,
+        description="Aspects to score explicitly, when the text has any.",
     )
 
     @model_validator(mode="after")

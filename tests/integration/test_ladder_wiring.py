@@ -11,9 +11,9 @@ them.
 
 Tiers 2 and 3 are scripted stubs rather than the real rungs, and that is a hard
 requirement rather than a convenience. ``LocalLLMTier.is_available()`` issues a
-real HTTP request to ``localhost:11434``, so a "real" wiring test would pass or
-fail depending on whether the developer running it happens to have an Ollama
-daemon up. Nothing here opens a socket.
+real HTTP request to air-llm's configured base URL, so a "real" wiring test
+would pass or fail depending on whether the developer running it happens to
+have air-llm up. Nothing here opens a socket.
 
 The inputs are built by the same preprocessing the API layer runs — normalise,
 detect language, score the lexicon, extract features — because the features
@@ -29,7 +29,7 @@ import time
 import pytest
 
 from air_classifier.config import Settings
-from air_classifier.constants import EscalationReason, Label, ResourceKind
+from air_classifier.constants import EscalationReason, Label, Provider
 from air_classifier.constants import Tier as TierId
 from air_classifier.pipeline.features import extract_features
 from air_classifier.pipeline.orchestrator import NoVerdictError, Orchestrator
@@ -47,13 +47,12 @@ from air_classifier.pipeline.tiers.t3_cloud_llm import CloudLLMTier
 from air_classifier.preprocess.language import detect_language
 from air_classifier.preprocess.lexicon import score_text
 from air_classifier.preprocess.normalize import normalize
-from air_classifier.providers.anthropic_provider import AnthropicProvider
+from air_classifier.providers.air_llm_provider import AirLlmProvider
 from air_classifier.providers.base import LLMProvider
-from air_classifier.providers.ollama_provider import OllamaProvider
-from air_classifier.providers.openai_provider import OpenAIProvider
-from air_classifier.providers.registry import ProviderRegistry
 from air_classifier.schemas.common import Options, SafetyReport, SentimentResult
 from air_classifier.schemas.verdict import OrchestrationResult, TierVerdict
+
+pytestmark = pytest.mark.integration
 
 # ── Building a request the way the API layer will ─────────────────────────────
 
@@ -62,7 +61,6 @@ def build_context(
     settings: Settings,
     text: str,
     *,
-    resource: ResourceKind = ResourceKind.SENTIMENT,
     options: Options | None = None,
     budget_s: float = 30.0,
     **resource_fields: object,
@@ -78,7 +76,6 @@ def build_context(
     lexicon = score_text(normalised.text)
     return TierContext(
         request_id="req_ladder_wiring",
-        resource=resource,
         text=normalised.text,
         original_length=len(text),
         language=detect_language(normalised.text),
@@ -119,6 +116,9 @@ class ScriptedTier:
 
     async def is_available(self) -> bool:
         return self._available
+
+    async def unavailable_reason(self) -> str | None:
+        return None if self._available else "scripted unavailable"
 
     def supports_language(self, code: str) -> bool:
         return True
@@ -206,8 +206,8 @@ def test_every_real_rung_satisfies_the_tier_protocol(settings: Settings) -> None
     candidates: list[object] = [
         RulesTier(settings),
         ClassifierTier(settings),
-        LocalLLMTier(settings, OllamaProvider(settings)),
-        CloudLLMTier(settings, ProviderRegistry(settings, {}, {})),
+        LocalLLMTier(settings, AirLlmProvider(settings, Provider.OLLAMA)),
+        CloudLLMTier(settings, AirLlmProvider(settings, Provider.ANTHROPIC)),
     ]
 
     rungs: list[Tier] = []
@@ -225,9 +225,8 @@ def test_every_real_rung_satisfies_the_tier_protocol(settings: Settings) -> None
 def test_every_provider_satisfies_the_llm_provider_protocol(settings: Settings) -> None:
     """Constructors only — no ``health()``, so no network from this test."""
     for provider in (
-        OllamaProvider(settings),
-        AnthropicProvider(settings),
-        OpenAIProvider(settings),
+        AirLlmProvider(settings, Provider.OLLAMA),
+        AirLlmProvider(settings, Provider.ANTHROPIC),
     ):
         assert isinstance(provider, LLMProvider), f"{type(provider).__name__} is not an LLMProvider"
 
@@ -374,9 +373,7 @@ async def test_a_rated_review_is_settled_by_tier_zero_without_prose(
     orchestrator, local, cloud = full_ladder(settings)
 
     result = await orchestrator.run(
-        build_context(
-            settings, "Perfect.", resource=ResourceKind.REVIEWS, rating=5, rating_scale_max=5
-        )
+        build_context(settings, "Perfect.", rating=5, rating_scale_max=5)
     )
 
     assert result.best.tier is TierId.T0_RULES

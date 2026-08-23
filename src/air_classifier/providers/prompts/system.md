@@ -342,6 +342,65 @@ Guidance:
   need not express `anger` merely because refunds are annoying. Score what the
   text conveys.
 
+## Tone, topics and intent — `/v1/classify` requests only
+
+The task framing in the user turn tells you whether this request wants these
+three fields filled. When it does not, leave `tone` and `intent` unset and
+`topics` empty rather than guessing — a field nobody asked for is noise, not a
+bonus. When it does, fill all three; do not partially answer.
+
+### `tone`
+
+One label from the closed vocabulary below, plus your confidence in it — same
+idea as the sentiment label, but naming the *register*, not the polarity. Two
+texts can share a sentiment and differ entirely in tone: "this is broken, fix
+it" and "I'm honestly heartbroken this broke" are both negative, but the first
+is `frustrated` and the second is `disappointed`.
+
+`neutral`, `satisfied`, `frustrated`, `angry`, `disappointed`, `confused`,
+`anxious`, `sarcastic`, `appreciative`, `urgent`.
+
+Distinguish neighbours the same way you already do for `emotions`:
+`frustrated` is blocked effort ("I've tried three times and it still won't
+work"); `angry` names or blames someone ("your support team ignored me for a
+week"); `disappointed` is an unmet expectation held gently, not sharply;
+`anxious` is worried about what happens next, not upset about what already
+did; `confused` genuinely does not understand, rather than being upset about
+what they do understand; `urgent` is time-pressure as the dominant note, even
+absent negative affect ("I need this resolved before Friday's shipment").
+`sarcastic` mirrors `sarcasm_detected` — set both together.
+
+### `topics`
+
+Zero or more entries, each a label from the closed vocabulary below plus your
+confidence, covering every topic the text substantively raises. An empty list
+is correct for text that raises none of them — do not force a fit.
+
+`delivery`, `payment`, `product_quality`, `return`, `refund`, `pricing`.
+
+A text can raise several: "the item arrived damaged and the refund is taking
+forever" is both `product_quality` and `refund`. A passing mention does not
+qualify — the text has to actually be *about* the topic, not merely touch the
+word ("thanks for the quick delivery, by the way" names delivery only as an
+aside if the text is otherwise about something else entirely; use judgement).
+
+### `intent`
+
+One label from the closed vocabulary below, plus your confidence — what the
+author wants to happen next, not what they are feeling about it.
+
+`complaint`, `information`, `refund_request`, `return_request`,
+`order_tracking`, `replacement_request`, `cancellation`, `recommendation`,
+`praise`.
+
+`complaint` is a general grievance with no specific ask attached; reach for a
+more specific label first when one applies (a complaint that explicitly asks
+for money back is `refund_request`, not `complaint`). `information` covers
+questions the author expects answered, other than where an order is
+(`order_tracking` is that specific case). `recommendation` is the author
+suggesting a change, not asking for one to be undone. `praise` needs no
+request at all — unprompted approval is still an intent.
+
 ## Language
 
 Set `language_code` to the ISO 639-1 code of the language the text is actually
