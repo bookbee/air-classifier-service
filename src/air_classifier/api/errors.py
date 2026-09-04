@@ -79,6 +79,11 @@ class AppError(Exception):
     slug: ClassVar[str] = "internal-error"
     title: ClassVar[str] = "Internal server error"
     status: ClassVar[int] = 500
+    #: Whether the same request, unmodified, might succeed if retried. False by
+    #: default — most of the catalogue is a client error or a defect, and
+    #: neither is fixed by trying again. Only the handful of genuinely
+    #: transient-dependency failures below override it.
+    retryable: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -104,6 +109,7 @@ class AppError(Exception):
             instance=instance,
             request_id=request_id,
             errors=self.errors,
+            retryable=self.retryable,
         )
 
 
@@ -170,6 +176,7 @@ class RateLimitedError(AppError):
     slug = "rate-limited"
     title = "Rate limit exceeded"
     status = 429
+    retryable = True
 
     def __init__(
         self,
@@ -201,6 +208,11 @@ class NoVerdictAvailableError(AppError):
     slug = "no-verdict"
     title = "No verdict available"
     status = 503
+    # By construction (see the module docstring) this is never a defect in this
+    # service — every enabled tier failed or abstained, almost always because a
+    # dependency (air-llm, a cloud provider) was down or slow. That can clear on
+    # its own, which is exactly what "retryable" is for.
+    retryable = True
 
 
 #: Status → catalogue entry, used to give Starlette's own ``HTTPException``s
@@ -272,24 +284,32 @@ def _request_id(request: Request) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _slug_for_status(status: int) -> tuple[str, str]:
+def _slug_for_status(status: int) -> tuple[str, str, bool]:
     """Catalogue entry for a status, or one derived from the HTTP phrase.
 
     The §9 table does not cover every status Starlette can raise (405, 415, …).
     Deriving the slug from the reason phrase keeps those responses in the same
     shape and gives them a stable, guessable ``type`` URI instead of collapsing
     them onto a status the caller did not actually hit.
+
+    The third element is ``retryable``. A catalogued status uses its class's own
+    verdict; an uncatalogued one falls back to a status-family heuristic — 5xx
+    defaults to retryable (a server-side problem, plausibly transient), 4xx does
+    not (a client error, unchanged by trying again) — 501 is the one deliberate
+    exception, since "not implemented" cannot become true by retrying.
     """
     known = _BY_STATUS.get(status)
     if known is not None:
-        return known.slug, known.title
+        return known.slug, known.title, known.retryable
     try:
         phrase = HTTPStatus(status).phrase
     except ValueError:
         phrase = "HTTP error"
     # Slugs land in a URI, so collapse everything outside [a-z0-9] rather than
     # only spaces — "I'm a Teapot" must not put an apostrophe in a `type`.
-    return re.sub(r"[^a-z0-9]+", "-", phrase.lower()).strip("-"), phrase
+    slug = re.sub(r"[^a-z0-9]+", "-", phrase.lower()).strip("-")
+    retryable = status >= 500 and status != HTTPStatus.NOT_IMPLEMENTED
+    return slug, phrase, retryable
 
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
@@ -326,7 +346,7 @@ async def _http_exception_handler(request: Request, exc: Exception) -> Response:
     accompany — ``Allow`` on a 405, ``WWW-Authenticate`` on a 401.
     """
     assert isinstance(exc, StarletteHTTPException)
-    slug, title = _slug_for_status(exc.status_code)
+    slug, title, retryable = _slug_for_status(exc.status_code)
     problem = ProblemDetail.build(
         slug=slug,
         title=title,
@@ -334,6 +354,7 @@ async def _http_exception_handler(request: Request, exc: Exception) -> Response:
         detail=str(exc.detail) if exc.detail else None,
         instance=_instance(request),
         request_id=_request_id(request),
+        retryable=retryable,
     )
     return problem_response(problem, headers=exc.headers or {})
 

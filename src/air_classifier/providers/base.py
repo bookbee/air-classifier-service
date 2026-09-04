@@ -104,6 +104,7 @@ class LLMProvider(Protocol):
         model: str,
         max_tokens: int,
         cache_prefix: bool = True,
+        remaining_ms: float | None = None,
     ) -> ProviderResult:
         """Run one constrained completion.
 
@@ -117,6 +118,15 @@ class LLMProvider(Protocol):
             max_tokens: Output ceiling.
             cache_prefix: Request prompt caching of the system prefix where the
                 provider supports it.
+            remaining_ms: How long the caller will actually wait, computed the
+                same way the timeout this call is wrapped in already is — not a
+                new budget, a restatement of the one that already governs this
+                call. Advisory: a provider under no obligation to read it must
+                still behave correctly if it ignores it entirely. The point is
+                to let a provider that *can* read it stop doing work for an
+                answer that will already have been discarded by the time it
+                would arrive, rather than to enforce anything on this side that
+                the timeout this call is wrapped in does not already enforce.
 
         Raises:
             ProviderUnavailableError: Not configured or unreachable.

@@ -35,6 +35,7 @@ from air_classifier.pipeline.policy import EscalationPolicy
 from air_classifier.pipeline.tiers.base import Tier as TierProtocol
 from air_classifier.pipeline.tiers.base import TierContext
 from air_classifier.pipeline.tiers.scorers import LEXICON_SCORER_NAME
+from air_classifier.providers.prompts.loader import compact_system_prompt_version
 from air_classifier.schemas.verdict import TierVerdict
 from air_classifier.security.api_keys import ApiKeyStore
 from air_classifier.security.quotas import RateLimiter
@@ -464,6 +465,9 @@ async def test_capabilities_marks_an_enabled_but_unreachable_rung(
     assert entry["available"] is False
     assert entry["model_version"] == "llama3.2:3b"
     assert entry["detail"]["languages"] == "any"
+    # Present regardless of tier health — an operator diagnosing a regression
+    # needs to know which prompt was live even while the rung is down.
+    assert entry["detail"]["prompt_version"] == compact_system_prompt_version()
 
 
 async def test_capabilities_reports_the_limits_a_caller_must_respect(

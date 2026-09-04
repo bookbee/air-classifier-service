@@ -88,6 +88,12 @@ test-unit: ## Run only tests that need no external service
 test-integration: ## Run the multi-component wiring suite (tests/integration/, no external services)
 	$(PYTEST) tests/integration -m integration
 
+test-eval: ## Run the golden accuracy/calibration set (tests/eval/, no external services) — put this in CI
+	$(PYTEST) tests/eval -m "not live"
+
+test-eval-live: ## Run the golden set's T2/T3 cases against a reachable air-llm (AIR_LLM_TOKEN, AIR_LLM_BASE_URL)
+	$(PYTEST) tests/eval -m live
+
 lint: ## Ruff lint + format check
 	$(PY) -m ruff check $(SOURCES)
 	$(PY) -m ruff format --check $(SOURCES)

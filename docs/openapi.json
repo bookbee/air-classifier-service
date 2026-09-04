@@ -1237,6 +1237,12 @@
             },
             "type": "array",
             "title": "Errors"
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable",
+            "description": "An RFC 9457 extension member, not part of the base spec. True when the same request, unmodified, might succeed on retry (a transient dependency failure); false when it would not (a client error, or a defect retrying will not fix).",
+            "default": false
           }
         },
         "type": "object",

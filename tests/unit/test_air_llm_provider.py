@@ -64,7 +64,12 @@ def _body(**over: Any) -> dict[str, Any]:
     return base
 
 
-async def _classify(provider: AirLlmProvider, *, model: str = "claude-haiku-4-5") -> Any:
+async def _classify(
+    provider: AirLlmProvider,
+    *,
+    model: str = "claude-haiku-4-5",
+    remaining_ms: float | None = None,
+) -> Any:
     try:
         return await provider.classify(
             system_prompt="rubric",
@@ -72,6 +77,7 @@ async def _classify(provider: AirLlmProvider, *, model: str = "claude-haiku-4-5"
             output_model=_Out,
             model=model,
             max_tokens=256,
+            remaining_ms=remaining_ms,
         )
     finally:
         await provider.aclose()
@@ -102,6 +108,29 @@ async def test_classify_validates_and_maps_usage() -> None:
     assert sent["json_schema"]["properties"]["label"]["type"] == "string"
     assert sent["schema_name"] == "_Out"
     assert route.calls.last.request.headers["x-api-key"] == "air-llm-token"
+
+
+@respx.mock
+async def test_remaining_budget_rides_as_an_advisory_header() -> None:
+    """air-llm is free to ignore this — sending it costs nothing and lets a
+    provider that reads it stop early on a call whose answer would already be
+    discarded by the time it arrived."""
+    route = respx.post(INFERENCE_URL).mock(return_value=httpx.Response(200, json=_body()))
+
+    await _classify(_provider(), remaining_ms=1234.6)
+
+    assert route.calls.last.request.headers["x-remaining-budget-ms"] == "1235"
+
+
+@respx.mock
+async def test_no_remaining_budget_header_when_none_is_given() -> None:
+    """The header is advisory and per-call — absent, not sent as a stale or
+    zero value, when the caller did not compute one."""
+    route = respx.post(INFERENCE_URL).mock(return_value=httpx.Response(200, json=_body()))
+
+    await _classify(_provider())
+
+    assert "x-remaining-budget-ms" not in route.calls.last.request.headers
 
 
 @respx.mock

@@ -23,15 +23,24 @@ cached. Nothing in this module interpolates anything into the system prompt.
 
 from __future__ import annotations
 
+import hashlib
 from importlib import resources
 from typing import Any, Final
 
+from air_classifier.cache.base import text_fingerprint
 from air_classifier.constants import Label
+from air_classifier.observability.logging import get_logger
 from air_classifier.pipeline.tiers.base import TierContext
+
+logger = get_logger(__name__)
 
 _PROMPT_PACKAGE: Final[str] = "air_classifier.providers.prompts"
 _SYSTEM_FILE: Final[str] = "system.md"
 _SYSTEM_COMPACT_FILE: Final[str] = "system_compact.md"
+
+#: How much of the content hash to keep — enough to distinguish prompt
+#: revisions in a log line or a trace, not a cryptographic commitment.
+_VERSION_CHARS: Final[int] = 12
 
 
 def _read(name: str) -> str:
@@ -43,8 +52,25 @@ def _read(name: str) -> str:
     return resources.files(_PROMPT_PACKAGE).joinpath(name).read_text(encoding="utf-8")
 
 
+def _version_of(text: str) -> str:
+    """A short, stable fingerprint of a prompt's exact content.
+
+    Computed once, from the file actually loaded — not a hand-maintained
+    version string that can drift from what the process is really sending.
+    Two deployments only ever share a version if they are sending
+    byte-identical prompts, which is exactly the question "did this change
+    behavior?" needs answered.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:_VERSION_CHARS]
+
+
 _SYSTEM_PROMPT: Final[str] = _read(_SYSTEM_FILE)
 _SYSTEM_COMPACT_PROMPT: Final[str] = _read(_SYSTEM_COMPACT_FILE)
+
+#: Fingerprints of the two prompts above, computed once at import — see
+#: `system_prompt_version`/`compact_system_prompt_version`.
+SYSTEM_PROMPT_VERSION: Final[str] = _version_of(_SYSTEM_PROMPT)
+SYSTEM_COMPACT_PROMPT_VERSION: Final[str] = _version_of(_SYSTEM_COMPACT_PROMPT)
 
 #: Rough characters-per-token for English prose with markdown punctuation. Only
 #: ever used to check headroom against the cache floor, never for billing.
@@ -94,9 +120,12 @@ _FIELD_LABELS: Final[dict[str, str]] = {
 }
 
 #: Fences around the caller's text. An explicit boundary is the cheapest defence
-#: against an input that tries to read as instructions.
-_TEXT_OPEN: Final[str] = "<<<INPUT_TEXT"
-_TEXT_CLOSE: Final[str] = "INPUT_TEXT"
+#: against an input that tries to read as instructions — paired and distinctive
+#: on purpose, not `INPUT_TEXT` alone: a marker plain enough for ordinary text
+#: to contain by chance is a marker a caller's own text can spoof to fake an
+#: early close and smuggle content past the boundary as if it came from us.
+_TEXT_OPEN: Final[str] = "<<<BEGIN_INPUT_TEXT>>>"
+_TEXT_CLOSE: Final[str] = "<<<END_INPUT_TEXT>>>"
 
 
 def system_prompt() -> str:
@@ -107,6 +136,16 @@ def system_prompt() -> str:
     roughly a tenth of the input rate from the second request onward.
     """
     return _SYSTEM_PROMPT
+
+
+def system_prompt_version() -> str:
+    """Fingerprint of the exact `system_prompt()` text this process is sending.
+
+    For tracing and `/v1/capabilities` — so a verdict, or a report that one
+    tier's answers changed, can be tied to which prompt revision produced it
+    without diffing files across deployments by hand.
+    """
+    return SYSTEM_PROMPT_VERSION
 
 
 def compact_system_prompt() -> str:
@@ -134,6 +173,12 @@ def compact_system_prompt() -> str:
     discussion and most of the worked examples.
     """
     return _SYSTEM_COMPACT_PROMPT
+
+
+def compact_system_prompt_version() -> str:
+    """Fingerprint of the exact `compact_system_prompt()` text — see
+    `system_prompt_version`."""
+    return SYSTEM_COMPACT_PROMPT_VERSION
 
 
 def estimated_system_tokens() -> int:
@@ -174,6 +219,19 @@ def user_content(ctx: TierContext) -> str:
             "They were not trusted enough to be final. Treat them as hints, not as answers.",
             *findings,
         ]
+
+    if _TEXT_OPEN in ctx.text or _TEXT_CLOSE in ctx.text:
+        # Not a block: the fence markers are distinctive enough that this is
+        # already an unlikely accident, structured output still bounds what a
+        # fooled model could return, and a caller whose *legitimate* text
+        # happens to contain them must not lose service over it. This is the
+        # detection half of defence in depth — an operator seeing this fire
+        # repeatedly for one key has a real signal worth acting on.
+        logger.warning(
+            "prompt.fence_marker_in_input",
+            request_id=ctx.request_id,
+            text_sha256=text_fingerprint(ctx.text),
+        )
 
     sections += [
         "",

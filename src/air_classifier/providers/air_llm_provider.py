@@ -46,6 +46,9 @@ _INFERENCE_PATH: Final[str] = "/v1/inference"
 _READY_PATH: Final[str] = "/v1/ready"
 _HEALTH_TIMEOUT_S: Final[float] = 2.0
 _SCHEMA_ERROR_CHARS: Final[int] = 500
+#: Advisory — see `LLMProvider.classify`'s `remaining_ms` docstring. air-llm is
+#: free to ignore it; sending it costs nothing and lets it stop early if it chooses to.
+_REMAINING_BUDGET_HEADER: Final[str] = "X-Remaining-Budget-Ms"
 #: finish_reason air-llm reports when the model stopped before it could close
 #: the object — nothing that validates could have come back.
 _LENGTH_FINISH_REASON: Final[str] = "length"
@@ -191,6 +194,7 @@ class AirLlmProvider:
         model: str,
         max_tokens: int,
         cache_prefix: bool = True,
+        remaining_ms: float | None = None,
     ) -> ProviderResult:
         if not self.configured:
             raise ProviderUnavailableError("air-llm is not configured")
@@ -209,8 +213,12 @@ class AirLlmProvider:
         )
 
         started = time.perf_counter()
-        async with span("provider.air_llm", label=self.name.value, model=model):
-            body = await self._post_inference(client, request, model=model)
+        async with span(
+            "provider.air_llm", label=self.name.value, model=model, remaining_ms=remaining_ms
+        ):
+            body = await self._post_inference(
+                client, request, model=model, remaining_ms=remaining_ms
+            )
         latency_ms = (time.perf_counter() - started) * 1000.0
 
         if body.refusal:
@@ -272,11 +280,23 @@ class AirLlmProvider:
             return self._client
 
     async def _post_inference(
-        self, client: httpx.AsyncClient, request: _InferenceRequest, *, model: str
+        self,
+        client: httpx.AsyncClient,
+        request: _InferenceRequest,
+        *,
+        model: str,
+        remaining_ms: float | None = None,
     ) -> _InferenceResponse:
+        # Per-call header, not a client default: every call on this shared
+        # client has a different remaining budget by the time it fires.
+        headers = (
+            {_REMAINING_BUDGET_HEADER: str(round(remaining_ms))}
+            if remaining_ms is not None
+            else None
+        )
         try:
             response = await client.post(
-                _INFERENCE_PATH, json=request.model_dump(mode="json")
+                _INFERENCE_PATH, json=request.model_dump(mode="json"), headers=headers
             )
         except httpx.TimeoutException as exc:
             raise ProviderUnavailableError(

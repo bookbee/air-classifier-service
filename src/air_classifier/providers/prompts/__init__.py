@@ -12,6 +12,7 @@ from air_classifier.providers.prompts.loader import (
     estimated_system_tokens,
     repair_instruction,
     system_prompt,
+    system_prompt_version,
     user_content,
 )
 
@@ -20,5 +21,6 @@ __all__ = [
     "estimated_system_tokens",
     "repair_instruction",
     "system_prompt",
+    "system_prompt_version",
     "user_content",
 ]

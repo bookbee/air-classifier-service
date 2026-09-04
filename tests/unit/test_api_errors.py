@@ -76,6 +76,14 @@ def build_app(settings: Settings) -> FastAPI:
     async def teapot() -> None:
         raise HTTPException(status_code=418)
 
+    @app.get("/uncatalogued-5xx")
+    async def uncatalogued_5xx() -> None:
+        raise HTTPException(status_code=502, detail="upstream said no")
+
+    @app.get("/not-implemented")
+    async def not_implemented() -> None:
+        raise HTTPException(status_code=501)
+
     return app
 
 
@@ -91,29 +99,35 @@ async def client(settings: Settings) -> AsyncIterator[httpx.AsyncClient]:
 
 
 @pytest.mark.parametrize(
-    ("error", "slug", "status"),
+    ("error", "slug", "status", "retryable"),
     [
-        (MalformedRequestError(), "malformed-request", 400),
-        (MissingApiKeyError(), "missing-api-key", 401),
-        (InsufficientScopeError(), "insufficient-scope", 403),
-        (NotFoundError(), "not-found", 404),
-        (IdempotencyConflictError(), "idempotency-conflict", 409),
-        (ValidationError(), "validation-error", 422),
-        (RateLimitedError(), "rate-limited", 429),
-        (InternalError(), "internal-error", 500),
-        (NoVerdictAvailableError(), "no-verdict", 503),
+        (MalformedRequestError(), "malformed-request", 400, False),
+        (MissingApiKeyError(), "missing-api-key", 401, False),
+        (InsufficientScopeError(), "insufficient-scope", 403, False),
+        (NotFoundError(), "not-found", 404, False),
+        (IdempotencyConflictError(), "idempotency-conflict", 409, False),
+        (ValidationError(), "validation-error", 422, False),
+        (RateLimitedError(), "rate-limited", 429, True),
+        (InternalError(), "internal-error", 500, False),
+        (NoVerdictAvailableError(), "no-verdict", 503, True),
     ],
 )
-def test_catalogue_matches_the_lld(error: AppError, slug: str, status: int) -> None:
-    """Every entry in docs/02-lld.md §9, with its exact slug and status."""
+def test_catalogue_matches_the_lld(
+    error: AppError, slug: str, status: int, retryable: bool
+) -> None:
+    """Every entry in docs/02-lld.md §9, with its exact slug, status and
+    retryable verdict — a caller must be able to trust this without a
+    status-code lookup table of its own."""
     assert error.slug == slug
     assert error.status == status
+    assert error.retryable is retryable
     problem = error.to_problem(instance="/v1/classify", request_id="req_1")
     assert problem.type == f"{ERROR_TYPE_BASE}/{slug}"
     assert problem.status == status
     assert problem.title == error.title
     assert problem.instance == "/v1/classify"
     assert problem.request_id == "req_1"
+    assert problem.retryable is retryable
 
 
 def test_rate_limited_floors_retry_after_at_one_second() -> None:
@@ -244,7 +258,31 @@ async def test_unknown_status_falls_back_to_its_phrase(client: httpx.AsyncClient
 
     assert response.status_code == 418
     # "I'm a Teapot" — the apostrophe is collapsed, so the type stays URI-safe.
-    assert response.json()["type"] == f"{ERROR_TYPE_BASE}/i-m-a-teapot"
+    body = response.json()
+    assert body["type"] == f"{ERROR_TYPE_BASE}/i-m-a-teapot"
+    # Uncatalogued 4xx: a client error, unchanged by retrying.
+    assert body["retryable"] is False
+
+
+async def test_uncatalogued_5xx_defaults_to_retryable(client: httpx.AsyncClient) -> None:
+    """A status outside the §9 catalogue still gets a retryable verdict — a
+    caller should never have to special-case "status not in the docs" into
+    "no signal at all"."""
+    response = await client.get("/uncatalogued-5xx")
+
+    assert response.status_code == 502
+    assert response.json()["retryable"] is True
+
+
+async def test_not_implemented_is_the_deliberate_5xx_exception(
+    client: httpx.AsyncClient,
+) -> None:
+    """501 is a 5xx that retrying can never fix — the endpoint still will not
+    be implemented — so it is carved out of the otherwise-retryable default."""
+    response = await client.get("/not-implemented")
+
+    assert response.status_code == 501
+    assert response.json()["retryable"] is False
 
 
 # ── The ladder's only 5xx ─────────────────────────────────────────────────────

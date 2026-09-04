@@ -30,6 +30,14 @@ class ProblemDetail(BaseModel):
     instance: str | None = Field(default=None, description="URI of the specific occurrence.")
     request_id: str | None = None
     errors: list[FieldError] = Field(default_factory=list)
+    retryable: bool = Field(
+        default=False,
+        description=(
+            "An RFC 9457 extension member, not part of the base spec. True when the same "
+            "request, unmodified, might succeed on retry (a transient dependency failure); "
+            "false when it would not (a client error, or a defect retrying will not fix)."
+        ),
+    )
 
     @classmethod
     def build(
@@ -42,6 +50,7 @@ class ProblemDetail(BaseModel):
         instance: str | None = None,
         request_id: str | None = None,
         errors: list[FieldError] | None = None,
+        retryable: bool = False,
     ) -> ProblemDetail:
         return cls(
             type=f"{ERROR_TYPE_BASE}/{slug}",
@@ -51,4 +60,5 @@ class ProblemDetail(BaseModel):
             instance=instance,
             request_id=request_id,
             errors=errors or [],
+            retryable=retryable,
         )

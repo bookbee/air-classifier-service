@@ -42,6 +42,7 @@ from air_classifier.providers.base import (
 from air_classifier.providers.prompts.loader import (
     repair_instruction,
     system_prompt,
+    system_prompt_version,
     user_content,
 )
 from air_classifier.resilience.breaker import CircuitBreaker, CircuitOpenError
@@ -114,7 +115,11 @@ class CloudLLMTier:
             raise TierUnavailableError("latency budget exhausted before the cloud call")
 
         started = time.perf_counter()
-        async with span("tier.t3_cloud_llm", model=self._config.cloud_model):
+        async with span(
+            "tier.t3_cloud_llm",
+            model=self._config.cloud_model,
+            prompt_version=system_prompt_version(),
+        ):
             primary = await self._call(
                 ctx,
                 model=self._config.cloud_model,
@@ -261,10 +266,11 @@ class CloudLLMTier:
         max_tokens: int,
         user_text: str,
     ) -> ProviderResult:
+        timeout_s = self._timeout_s(ctx)
         try:
             result = await guarded(
                 self._provider.classify,
-                timeout_s=self._timeout_s(ctx),
+                timeout_s=timeout_s,
                 breaker=self._breaker,
                 bulkhead=self._bulkhead,
                 system_prompt=system_prompt(),
@@ -273,6 +279,7 @@ class CloudLLMTier:
                 model=model,
                 max_tokens=max_tokens,
                 cache_prefix=True,
+                remaining_ms=timeout_s * 1000.0,
             )
         except ProviderRefusalError as exc:
             raise TierError(f"cloud provider refused: {exc}") from exc

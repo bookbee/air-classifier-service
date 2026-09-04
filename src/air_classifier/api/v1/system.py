@@ -51,6 +51,10 @@ from air_classifier.observability import metrics
 from air_classifier.observability.logging import get_logger
 from air_classifier.pipeline.tiers.base import Tier as TierProtocol
 from air_classifier.pipeline.tiers.scorers import LEXICON_SCORER_NAME
+from air_classifier.providers.prompts.loader import (
+    compact_system_prompt_version,
+    system_prompt_version,
+)
 from air_classifier.schemas.classify import MAX_TEXT_CHARS
 from air_classifier.schemas.common import CapabilitiesResponse, TierCapability
 from air_classifier.schemas.errors import ProblemDetail
@@ -406,8 +410,11 @@ def _tier_detail(
             "languages": list(settings.classifier.supported_languages),
         }
 
-    if tier_id in (TierId.T2_LOCAL_LLM, TierId.T3_CLOUD_LLM):
-        return {"languages": "any"}
+    if tier_id is TierId.T2_LOCAL_LLM:
+        return {"languages": "any", "prompt_version": compact_system_prompt_version()}
+
+    if tier_id is TierId.T3_CLOUD_LLM:
+        return {"languages": "any", "prompt_version": system_prompt_version()}
 
     return {}
 

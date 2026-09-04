@@ -721,8 +721,8 @@ outage produces a `200` with `degraded: true` and a lower-tier verdict.
 | **Tier fakes** | Orchestrator driven by scripted fake tiers — verifies ordering, `min_tier`/`max_tier`, budget and cost stops, failure→degrade, best-verdict selection, and the multi-hop lookahead, with **no network at all** |
 | **Contract** | Golden request/response fixtures; OpenAPI snapshot diffed in CI so a schema change cannot land silently |
 | **Provider** | Scripted-stub tests for `AirLlmProvider` against air-llm's `/v1/inference` contract (health, classify, error mapping) — no network, no real air-llm |
-| **Integration** | Full stack (Redis + a reachable air-llm); asserts trace completeness, metric emission, and non-zero `cache_read_tokens` on the second identical cloud call |
-| **Accuracy** | Labelled evaluation set; per-tier confusion matrices; ladder-vs-cloud-only agreement; regression gate on merge |
+| **Integration** | Real Tier 0/Tier 1 and the real `Orchestrator`/`EscalationPolicy` wired together (`tests/integration/`); Tiers 2/3 are scripted stubs — no external services, nothing opens a socket |
+| **Accuracy** | `evals/golden_set.jsonl` — labelled examples run through the real app (`tests/eval/`), split CI-safe (T0/T1, `make test-eval`) vs. needs-air-llm (T2/T3, `pytest.mark.live`, `make test-eval-live`); a directional calibration check asserts confident cases score meaningfully higher than deliberately-hard ones, not full confusion matrices or ladder-vs-cloud-only agreement measurement — see the file's own docstring for what it does and does not claim |
 
 ## 11. Implementation order
 

@@ -43,6 +43,7 @@ from air_classifier.providers.base import (
 )
 from air_classifier.providers.prompts.loader import (
     compact_system_prompt,
+    compact_system_prompt_version,
     repair_instruction,
     user_content,
 )
@@ -135,6 +136,7 @@ class LocalLLMTier:
             tier=self.tier.value,
             model=self._model,
             request_id=ctx.request_id,
+            prompt_version=compact_system_prompt_version(),
         ):
             result = await self._classify_with_one_repair(ctx, system, user)
         latency_ms = (time.perf_counter() - started) * 1000.0
@@ -201,6 +203,7 @@ class LocalLLMTier:
                 model=self._model,
                 max_tokens=_MAX_OUTPUT_TOKENS,
                 cache_prefix=False,
+                remaining_ms=timeout_s * 1000.0,
             )
         except ProviderSchemaError:
             raise

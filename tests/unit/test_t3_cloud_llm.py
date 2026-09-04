@@ -73,6 +73,7 @@ class _ScriptedProvider:
         model: str,
         max_tokens: int,
         cache_prefix: bool = True,
+        remaining_ms: float | None = None,
     ) -> ProviderResult:
         self.calls.append(
             {
@@ -82,6 +83,7 @@ class _ScriptedProvider:
                 "model": model,
                 "max_tokens": max_tokens,
                 "cache_prefix": cache_prefix,
+                "remaining_ms": remaining_ms,
             }
         )
         if not self._outcomes:
