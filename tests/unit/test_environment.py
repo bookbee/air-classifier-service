@@ -13,8 +13,8 @@ import os
 
 import pytest
 
-from air_classifier.cache.memory import MemoryCache
-from air_classifier.config import Settings
+from air_classifier_service.cache.memory import MemoryCache
+from air_classifier_service.config import Settings
 
 
 def test_no_air_classifier_environment_leaks_into_the_suite() -> None:
@@ -121,13 +121,13 @@ def test_overriding_one_audit_key_preserves_the_others(
     audit = Settings().audit
     assert audit.backend == "none"
     assert audit.ttl_days == 7
-    assert audit.database == "air_classifier"
+    assert audit.database == "air_classifier_service"
     assert audit.queue_max_size == 1000
 
 
 def test_a_bare_tier_settings_merges_rather_than_resets() -> None:
     """`TiersSettings(t2=TierSettings(timeout_ms=...))` means change one knob."""
-    from air_classifier.config import TierSettings, TiersSettings
+    from air_classifier_service.config import TierSettings, TiersSettings
 
     tier = TiersSettings(t2_local_llm=TierSettings(timeout_ms=4000)).t2_local_llm
     assert (tier.timeout_ms, tier.confidence_floor, tier.margin_floor) == (4000, 0.72, 0.20)

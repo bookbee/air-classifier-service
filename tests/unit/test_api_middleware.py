@@ -13,12 +13,12 @@ from fastapi import APIRouter, FastAPI, Request
 from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
 
-from air_classifier.api.errors import (
+from air_classifier_service.api.errors import (
     PROBLEM_CONTENT_TYPE,
     MissingApiKeyError,
     install_error_handlers,
 )
-from air_classifier.api.middleware import (
+from air_classifier_service.api.middleware import (
     AccessLogMiddleware,
     BodySizeLimitMiddleware,
     RequestContextMiddleware,
@@ -26,9 +26,9 @@ from air_classifier.api.middleware import (
     new_request_id,
     resolve_request_id,
 )
-from air_classifier.config import AppSettings, Settings
-from air_classifier.constants import ERROR_TYPE_BASE, HEADER_REQUEST_ID
-from air_classifier.observability import metrics
+from air_classifier_service.config import AppSettings, Settings
+from air_classifier_service.constants import ERROR_TYPE_BASE, HEADER_REQUEST_ID
+from air_classifier_service.observability import metrics
 
 #: Small enough that a test payload can exceed it without shipping a megabyte,
 #: but above the 1024 floor `AppSettings` enforces.

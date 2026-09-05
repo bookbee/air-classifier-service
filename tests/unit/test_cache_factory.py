@@ -11,11 +11,11 @@ from typing import Any
 
 import pytest
 
-from air_classifier.cache.base import CacheBackend
-from air_classifier.cache.factory import NullCache, build_cache
-from air_classifier.cache.memory import MemoryCache
-from air_classifier.cache.redis import RedisCache
-from air_classifier.config import CacheSettings, Settings
+from air_classifier_service.cache.base import CacheBackend
+from air_classifier_service.cache.factory import NullCache, build_cache
+from air_classifier_service.cache.memory import MemoryCache
+from air_classifier_service.cache.redis import RedisCache
+from air_classifier_service.config import CacheSettings, Settings
 
 #: Nothing listens here, so RedisCache must degrade rather than hang or raise.
 CLOSED_PORT_URL = "redis://127.0.0.1:1/0"

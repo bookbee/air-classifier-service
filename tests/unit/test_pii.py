@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from air_classifier.constants import PIIKind
-from air_classifier.preprocess.pii import luhn_valid, redact
+from air_classifier_service.constants import PIIKind
+from air_classifier_service.preprocess.pii import luhn_valid, redact
 
 
 def _kinds(text: str) -> set[PIIKind]:

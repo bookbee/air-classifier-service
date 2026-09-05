@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from starlette.responses import Response
 
-from air_classifier.api.deps import (
+from air_classifier_service.api.deps import (
     RATE_LIMIT_HEADERS_ATTR,
     STATE_ATTR,
     AppState,
@@ -35,29 +35,29 @@ from air_classifier.api.deps import (
     require_scope,
     store_idempotent,
 )
-from air_classifier.api.errors import (
+from air_classifier_service.api.errors import (
     IdempotencyConflictError,
     InsufficientScopeError,
     MissingApiKeyError,
     RateLimitedError,
     install_error_handlers,
 )
-from air_classifier.api.middleware import API_KEY_ID_ATTR
-from air_classifier.cache.base import idempotency_cache_key
-from air_classifier.cache.memory import MemoryCache
-from air_classifier.config import AppSettings, CacheSettings, SecuritySettings, Settings
-from air_classifier.constants import HEADER_API_KEY, HEADER_IDEMPOTENCY_KEY, Tier
-from air_classifier.pipeline.orchestrator import Orchestrator
-from air_classifier.pipeline.policy import EscalationPolicy
-from air_classifier.schemas.common import Options
-from air_classifier.security.api_keys import (
+from air_classifier_service.api.middleware import API_KEY_ID_ATTR
+from air_classifier_service.cache.base import idempotency_cache_key
+from air_classifier_service.cache.memory import MemoryCache
+from air_classifier_service.config import AppSettings, CacheSettings, SecuritySettings, Settings
+from air_classifier_service.constants import HEADER_API_KEY, HEADER_IDEMPOTENCY_KEY, Tier
+from air_classifier_service.pipeline.orchestrator import Orchestrator
+from air_classifier_service.pipeline.policy import EscalationPolicy
+from air_classifier_service.schemas.common import Options
+from air_classifier_service.security.api_keys import (
     SCOPE_ADMIN_READ,
     SCOPE_CLASSIFY_READ,
     ApiKeyRecord,
     ApiKeyStore,
     hash_key,
 )
-from air_classifier.security.quotas import RateLimiter
+from air_classifier_service.security.quotas import RateLimiter
 
 SALT = "test-salt"
 RAW_KEY = "airc_test_key"

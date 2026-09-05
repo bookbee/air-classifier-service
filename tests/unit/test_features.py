@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from air_classifier.pipeline.features import extract_features
-from air_classifier.preprocess.lexicon import LexiconScore, score_text
+from air_classifier_service.pipeline.features import extract_features
+from air_classifier_service.preprocess.lexicon import LexiconScore, score_text
 
 
 def test_every_field_is_populated_from_one_realistic_review() -> None:

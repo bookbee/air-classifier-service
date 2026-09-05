@@ -30,16 +30,16 @@ from typing import Any, Final
 import pytest
 from fastapi.testclient import TestClient
 
-from air_classifier.config import (
+from air_classifier_service.config import (
     AirLlmSettings,
     AppSettings,
     CacheSettings,
     SecuritySettings,
     Settings,
 )
-from air_classifier.constants import Tier
-from air_classifier.main import create_app
-from air_classifier.schemas.classify import ClassificationResponse
+from air_classifier_service.constants import Tier
+from air_classifier_service.main import create_app
+from air_classifier_service.schemas.classify import ClassificationResponse
 
 #: Mixed polarity with a contrastive conjunction: T0 has no shortcut for it and
 #: T1 is honestly unconfident, so the ladder climbs and the trace has more than

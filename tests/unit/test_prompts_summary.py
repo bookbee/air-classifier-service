@@ -10,17 +10,25 @@ from __future__ import annotations
 
 from structlog.testing import capture_logs
 
-from air_classifier.constants import Intent, Label, RoutingPriority, Tier, Tone, Topic, Urgency
-from air_classifier.providers.prompts.summary_loader import (
+from air_classifier_service.constants import (
+    Intent,
+    Label,
+    RoutingPriority,
+    Tier,
+    Tone,
+    Topic,
+    Urgency,
+)
+from air_classifier_service.providers.prompts.summary_loader import (
     SUMMARY_SYSTEM_PROMPT_VERSION,
     summary_repair_instruction,
     summary_system_prompt,
     summary_system_prompt_version,
     summary_user_content,
 )
-from air_classifier.schemas.classify import ClassificationResponse, ModelInfo, RoutingInfo
-from air_classifier.schemas.common import LabeledScore, LanguageInfo, SentimentResult
-from air_classifier.schemas.summary import CustomerSummary, SummaryItem
+from air_classifier_service.schemas.classify import ClassificationResponse, ModelInfo, RoutingInfo
+from air_classifier_service.schemas.common import LabeledScore, LanguageInfo, SentimentResult
+from air_classifier_service.schemas.summary import CustomerSummary, SummaryItem
 
 SECRET_RAW_TEXT = "the raw text nobody should re-send to the summariser"
 

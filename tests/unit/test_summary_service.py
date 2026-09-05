@@ -16,46 +16,46 @@ from typing import Any, cast
 
 import pytest
 
-from air_classifier.config import Settings
-from air_classifier.constants import Label, Provider, Tier, Topic, Urgency
-from air_classifier.pipeline.orchestrator import Orchestrator
-from air_classifier.pipeline.service import AnalysisService
-from air_classifier.pipeline.summary_service import (
+from air_classifier_service.config import Settings
+from air_classifier_service.constants import Label, Provider, Tier, Topic, Urgency
+from air_classifier_service.pipeline.orchestrator import Orchestrator
+from air_classifier_service.pipeline.service import AnalysisService
+from air_classifier_service.pipeline.summary_service import (
     SummaryService,
     _merge_rollup,
     _succeeded_pairs,
     _sum_usage,
     _to_classify_request,
 )
-from air_classifier.pipeline.tiers.base import TierContext
-from air_classifier.providers.base import (
+from air_classifier_service.pipeline.tiers.base import TierContext
+from air_classifier_service.providers.base import (
     ProviderResult,
     ProviderSchemaError,
     ProviderUnavailableError,
 )
-from air_classifier.resilience.breaker import CircuitBreaker
-from air_classifier.resilience.bulkhead import Bulkhead
-from air_classifier.schemas.classify import (
+from air_classifier_service.resilience.breaker import CircuitBreaker
+from air_classifier_service.resilience.bulkhead import Bulkhead
+from air_classifier_service.schemas.classify import (
     ClassificationResponse,
     ClassifyBatchItem,
     ModelInfo,
     RoutingInfo,
 )
-from air_classifier.schemas.common import (
+from air_classifier_service.schemas.common import (
     LabeledScore,
     LanguageInfo,
     RequestUsage,
     SentimentResult,
 )
-from air_classifier.schemas.errors import ProblemDetail
-from air_classifier.schemas.summary import (
+from air_classifier_service.schemas.errors import ProblemDetail
+from air_classifier_service.schemas.summary import (
     CustomerSummary,
     LLMSummaryOutput,
     SummaryItem,
     SummaryRefreshRequest,
     SummaryRollup,
 )
-from air_classifier.schemas.verdict import EscalationStep, OrchestrationResult, TierVerdict
+from air_classifier_service.schemas.verdict import EscalationStep, OrchestrationResult, TierVerdict
 
 TEXT_A = "a plain, undecorated piece of feedback text"
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Check that everything this service depends on is reachable, and that the
-# service itself is serving. Works whether air-classifier is running natively
+# service itself is serving. Works whether air-classifier-service is running natively
 # (`make run` / `make start`) or as a container (`make up`).
 #
 # Redis is air-infra's; every model call (Tier 2 and Tier 3 both) is air-llm's.
@@ -46,7 +46,7 @@ hdr "air-llm (tiers 2 and 3)"
 # Report what the service is ACTUALLY configured with, not a guess — a
 # container started against one air-llm keeps that URL regardless of what is
 # reachable when doctor is later called.
-container=$(docker ps --filter 'name=air-classifier-air-classifier' --format '{{.Names}}' 2>/dev/null | head -1)
+container=$(docker ps --filter 'name=air-classifier-service-air-classifier-service' --format '{{.Names}}' 2>/dev/null | head -1)
 if [ -n "$container" ]; then
   effective=$(docker exec "$container" printenv AIR_CLASSIFIER__AIR_LLM__BASE_URL 2>/dev/null)
   ok "container $container dials ${effective:-<unset, defaults to http://localhost:8083>}"
@@ -93,10 +93,10 @@ hdr "Port hygiene"
 # This repo must publish exactly one host port. Anything else here means a
 # shared component has crept back in and is re-binding a port air-infra or
 # air-llm owns.
-mine=$(docker ps --filter 'label=com.docker.compose.project=air-classifier' \
+mine=$(docker ps --filter 'label=com.docker.compose.project=air-classifier-service' \
   --format '{{.Names}} {{.Ports}}' 2>/dev/null)
 if [ -z "$mine" ]; then
-  ok "no air-classifier containers running (native mode)"
+  ok "no air-classifier-service containers running (native mode)"
 else
   shared=$(printf '%s\n' "$mine" | grep -Eo '0\.0\.0\.0:(6379|11434|8083|9090|3000)' | sort -u)
   if [ -z "$shared" ]; then

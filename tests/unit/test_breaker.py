@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from air_classifier.constants import Provider
-from air_classifier.observability import metrics
-from air_classifier.resilience.breaker import (
+from air_classifier_service.constants import Provider
+from air_classifier_service.observability import metrics
+from air_classifier_service.resilience.breaker import (
     BreakerState,
     CircuitBreaker,
     CircuitOpenError,

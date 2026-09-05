@@ -10,11 +10,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from air_classifier.audit.base import AuditEntry
-from air_classifier.audit.mongo import MongoAuditSink
-from air_classifier.config import AuditSettings
-from air_classifier.constants import Tier
-from air_classifier.observability import metrics
+from air_classifier_service.audit.base import AuditEntry
+from air_classifier_service.audit.mongo import MongoAuditSink
+from air_classifier_service.config import AuditSettings
+from air_classifier_service.constants import Tier
+from air_classifier_service.observability import metrics
 
 
 def _entry(request_id: str = "req_1") -> AuditEntry:

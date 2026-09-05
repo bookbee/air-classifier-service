@@ -10,6 +10,16 @@ scorer when the artifact is absent (docs/00-plan.md §4, resolved item 1), so an
 image built without a model is a degraded image, not a broken one — and that
 beats a release train blocked by someone else's CDN. Pass ``--strict`` to invert
 that for pipelines where the artifact is mandatory.
+
+Note for anyone reading this expecting it to produce today's actual Tier-1
+default: it does not. `MODEL_REPO` below is the older sequence-classification
+artifact this service shipped with first; the current default backend is the
+zero-shot NLI model `export_zeroshot_model.py` produces instead
+(`ClassifierSettings.scorer_kind = "zero_shot_nli"` in `config.py`). This
+stage's build args default to empty and it never actually runs in the current
+build (see the Dockerfile's `model` stage comment) — it is kept as a working,
+documented escape hatch for baking a different artifact in, not as the
+producer of what ships today.
 """
 
 from __future__ import annotations
@@ -48,7 +58,7 @@ TOKENIZER_FILENAME = "tokenizer.json"
 _CHUNK_BYTES = 1 << 20
 _ARTIFACT_MODE = 0o644
 _ALLOWED_SCHEMES = frozenset({"https"})
-_USER_AGENT = "air-classifier-fetch-model/1"
+_USER_AGENT = "air-classifier-service-fetch-model/1"
 _LOG_PREFIX = "[fetch-model]"
 
 

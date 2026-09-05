@@ -21,24 +21,24 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from prometheus_client import CONTENT_TYPE_LATEST
 
-from air_classifier import __version__
-from air_classifier.api.deps import AppState
-from air_classifier.api.v1 import system
-from air_classifier.cache.base import CacheBackend
-from air_classifier.cache.memory import MemoryCache
-from air_classifier.config import AppSettings, ClassifierSettings, Settings, TierSettings
-from air_classifier.config import TiersSettings as TiersConfig
-from air_classifier.constants import Tier as TierId
-from air_classifier.observability import metrics
-from air_classifier.pipeline.orchestrator import Orchestrator
-from air_classifier.pipeline.policy import EscalationPolicy
-from air_classifier.pipeline.tiers.base import Tier as TierProtocol
-from air_classifier.pipeline.tiers.base import TierContext
-from air_classifier.pipeline.tiers.scorers import LEXICON_SCORER_NAME
-from air_classifier.providers.prompts.loader import compact_system_prompt_version
-from air_classifier.schemas.verdict import TierVerdict
-from air_classifier.security.api_keys import ApiKeyStore
-from air_classifier.security.quotas import RateLimiter
+from air_classifier_service import __version__
+from air_classifier_service.api.deps import AppState
+from air_classifier_service.api.v1 import system
+from air_classifier_service.cache.base import CacheBackend
+from air_classifier_service.cache.memory import MemoryCache
+from air_classifier_service.config import AppSettings, ClassifierSettings, Settings, TierSettings
+from air_classifier_service.config import TiersSettings as TiersConfig
+from air_classifier_service.constants import Tier as TierId
+from air_classifier_service.observability import metrics
+from air_classifier_service.pipeline.orchestrator import Orchestrator
+from air_classifier_service.pipeline.policy import EscalationPolicy
+from air_classifier_service.pipeline.tiers.base import Tier as TierProtocol
+from air_classifier_service.pipeline.tiers.base import TierContext
+from air_classifier_service.pipeline.tiers.scorers import LEXICON_SCORER_NAME
+from air_classifier_service.providers.prompts.loader import compact_system_prompt_version
+from air_classifier_service.schemas.verdict import TierVerdict
+from air_classifier_service.security.api_keys import ApiKeyStore
+from air_classifier_service.security.quotas import RateLimiter
 
 
 class ProbeExplodedError(AssertionError):

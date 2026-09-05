@@ -226,3 +226,7 @@ __marimo__/
 
 # macOS Finder metadata.
 .DS_Store
+# Cloud-sync conflict copies (Dropbox/OneDrive-style ".!<pid>!.DS_Store") — the plain
+# ".DS_Store" rule above does not match this naming scheme, and one was previously
+# committed by accident (git history, since removed).
+.!*!.DS_Store

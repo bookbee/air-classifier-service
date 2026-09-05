@@ -10,16 +10,16 @@ from typing import Any, Literal
 import pytest
 import structlog
 
-from air_classifier.cache.base import text_fingerprint
-from air_classifier.config import (
+from air_classifier_service.cache.base import text_fingerprint
+from air_classifier_service.config import (
     AppSettings,
     ObservabilitySettings,
     SecuritySettings,
     Settings,
 )
-from air_classifier.observability import logging as obs_logging
-from air_classifier.observability import tracing as obs_tracing
-from air_classifier.observability.logging import (
+from air_classifier_service.observability import logging as obs_logging
+from air_classifier_service.observability import tracing as obs_tracing
+from air_classifier_service.observability.logging import (
     bind_request_context,
     clear_request_context,
     configure_logging,
@@ -80,14 +80,16 @@ def emitted(capsys: pytest.CaptureFixture[str]) -> list[dict[str, Any]]:
 
 def test_json_output_shape(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings())
-    get_logger("air_classifier.test").info("tier.decision", tier="t1_classifier", escalate=True)
+    get_logger("air_classifier_service.test").info(
+        "tier.decision", tier="t1_classifier", escalate=True
+    )
 
     records = emitted(capsys)
     assert len(records) == 1
     record = records[0]
     assert record["event"] == "tier.decision"
     assert record["level"] == "info"
-    assert record["logger"] == "air_classifier.test"
+    assert record["logger"] == "air_classifier_service.test"
     assert record["tier"] == "t1_classifier"
     assert record["escalate"] is True
     assert record["timestamp"].endswith("Z")
@@ -95,7 +97,7 @@ def test_json_output_shape(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_console_format_is_not_json(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings(log_format="console"))
-    get_logger("air_classifier.test").info("tier.decision", tier="t0_rules")
+    get_logger("air_classifier_service.test").info("tier.decision", tier="t0_rules")
 
     out = capsys.readouterr().out
     assert "tier.decision" in out
@@ -106,7 +108,7 @@ def test_console_format_is_not_json(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_level_filters_below_threshold(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings(log_level="WARNING"))
-    log = get_logger("air_classifier.test")
+    log = get_logger("air_classifier_service.test")
     log.info("suppressed")
     log.warning("kept")
 
@@ -115,7 +117,7 @@ def test_level_filters_below_threshold(capsys: pytest.CaptureFixture[str]) -> No
 
 def test_non_serialisable_values_do_not_raise(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings())
-    get_logger("air_classifier.test").info("weird", value=object())
+    get_logger("air_classifier_service.test").info("weird", value=object())
 
     assert emitted(capsys)[0]["value"].startswith("<object object")
 
@@ -125,7 +127,7 @@ def test_exception_is_rendered(capsys: pytest.CaptureFixture[str]) -> None:
     try:
         raise ValueError("boom")
     except ValueError:
-        get_logger("air_classifier.test").exception("tier.failed")
+        get_logger("air_classifier_service.test").exception("tier.failed")
 
     record = emitted(capsys)[0]
     assert record["level"] == "error"
@@ -143,7 +145,7 @@ def test_configure_is_idempotent(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(settings)
 
     assert len(logging.getLogger().handlers) == before + 1
-    get_logger("air_classifier.test").info("once")
+    get_logger("air_classifier_service.test").info("once")
     assert len(emitted(capsys)) == 1
 
 
@@ -174,7 +176,7 @@ def test_adopted_logger_handlers_are_replaced() -> None:
 def test_bound_context_appears_on_records(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings())
     bind_request_context(request_id="req_01J", trace_id="4bf9" * 8)
-    get_logger("air_classifier.test").info("http.request")
+    get_logger("air_classifier_service.test").info("http.request")
 
     record = emitted(capsys)[0]
     assert record["request_id"] == "req_01J"
@@ -191,7 +193,7 @@ def test_bound_context_reaches_stdlib_records(capsys: pytest.CaptureFixture[str]
 
 def test_clear_request_context_removes_fields(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(make_settings())
-    log = get_logger("air_classifier.test")
+    log = get_logger("air_classifier_service.test")
     bind_request_context(request_id="req_03L")
     log.info("during")
     clear_request_context()
@@ -228,7 +230,9 @@ def test_safe_text_fields_survives_a_log_round_trip(
     settings = make_settings()
     configure_logging(settings)
     text = "sécurité: 用户 feedback 🙂"
-    get_logger("air_classifier.test").info("tier.decision", **safe_text_fields(text, settings))
+    get_logger("air_classifier_service.test").info(
+        "tier.decision", **safe_text_fields(text, settings)
+    )
 
     record = emitted(capsys)[0]
     assert record["text_sha256"] == text_fingerprint(text)
@@ -252,7 +256,7 @@ def without_otel(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force the no-otel path regardless of whether the extra is installed.
 
     These tests cover the *degraded* configuration — a deployment built without
-    `air-classifier[otel]`. They used to assert the extra was genuinely absent,
+    `air-classifier-service[otel]`. They used to assert the extra was genuinely absent,
     which made them pass or fail on how the venv happened to be built: `make
     install` installs `.[all]`, so on a stock checkout they failed against the
     very environment the Makefile creates. Simulating absence keeps the coverage

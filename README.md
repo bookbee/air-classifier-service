@@ -1,4 +1,4 @@
-# air-classifier
+# air-classifier-service
 
 Text classification for the AIR platform. Takes text plus its surrounding context and returns
 a structured, explainable verdict over a versioned REST API — one route, one response shape:
@@ -300,7 +300,7 @@ thresholds live in configuration on purpose: retuning the ladder's cost/accuracy
 must never require a deploy of new logic.
 
 [`.env.example`](.env.example) documents every key with its default and marks the secrets.
-The types live in [`src/air_classifier/config.py`](src/air_classifier/config.py).
+The types live in [`src/air_classifier_service/config.py`](src/air_classifier_service/config.py).
 
 ## API
 

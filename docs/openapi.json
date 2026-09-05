@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "AIR Classifier",
+    "title": "AIR Classifier Service",
     "description": "Layered text classification with cost-aware escalation.\n\nOne entry point, `/v1/classify`, and one detailed response: sentiment, tone,\ntopics, intent, urgency, routing, a requires-human flag, aspect-level scoring\nand rating consistency \u2014 whichever of those the text and the ladder's reach\nactually support.\n\nEvery request enters at the cheapest rung of a four-tier ladder \u2014 deterministic\nrules, a statistical classifier, a locally served LLM, a metered cloud LLM \u2014 and\nclimbs only as far as the confidence, margin and complexity of the input\nactually require. The rung that decided is reported as `decided_by`, and the\nreasoning is in `escalation_trace`.\n\nA rung being unavailable is not an error. When a tier fails or a provider is\ndown, a lower rung answers and the response carries `degraded: true` with HTTP\n200. The only failure the ladder can surface is `503 no-verdict`, which means\nevery enabled rung declined.\n\nErrors are RFC 9457 `application/problem+json`.",
     "version": "0.1.0"
   },
@@ -1061,7 +1061,7 @@
           "service": {
             "type": "string",
             "title": "Service",
-            "default": "air-classifier"
+            "default": "air-classifier-service"
           },
           "version": {
             "type": "string",
@@ -1732,7 +1732,7 @@
           "source_type"
         ],
         "title": "SummaryItem",
-        "description": "One new feedback or review text to fold into a customer's summary.\n\nShares its optional fields with :class:`~air_classifier.schemas.classify.ClassifyRequest`\nbut is its own model, not a subclass: `ClassifyRequest` is `extra=\"forbid\"`\nand already a large, stable contract, and `source_type`/`occurred_at` are\nconcepts specific to this endpoint, not to single-text classification."
+        "description": "One new feedback or review text to fold into a customer's summary.\n\nShares its optional fields with\n:class:`~air_classifier_service.schemas.classify.ClassifyRequest`\nbut is its own model, not a subclass: `ClassifyRequest` is `extra=\"forbid\"`\nand already a large, stable contract, and `source_type`/`occurred_at` are\nconcepts specific to this endpoint, not to single-text classification."
       },
       "SummaryRefreshRequest": {
         "properties": {

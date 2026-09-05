@@ -6,8 +6,8 @@ import asyncio
 
 import pytest
 
-from air_classifier.cache.base import CacheBackend
-from air_classifier.cache.memory import MemoryCache
+from air_classifier_service.cache.base import CacheBackend
+from air_classifier_service.cache.memory import MemoryCache
 
 
 class FakeClock:

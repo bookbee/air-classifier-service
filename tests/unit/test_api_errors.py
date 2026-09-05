@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from structlog.testing import capture_logs
 
-from air_classifier.api.errors import (
+from air_classifier_service.api.errors import (
     PROBLEM_CONTENT_TYPE,
     AppError,
     IdempotencyConflictError,
@@ -24,10 +24,10 @@ from air_classifier.api.errors import (
     ValidationError,
     install_error_handlers,
 )
-from air_classifier.api.middleware import install_middleware
-from air_classifier.config import Settings
-from air_classifier.constants import ERROR_TYPE_BASE, HEADER_REQUEST_ID
-from air_classifier.pipeline.orchestrator import NoVerdictError
+from air_classifier_service.api.middleware import install_middleware
+from air_classifier_service.config import Settings
+from air_classifier_service.constants import ERROR_TYPE_BASE, HEADER_REQUEST_ID
+from air_classifier_service.pipeline.orchestrator import NoVerdictError
 
 
 class Payload(BaseModel):

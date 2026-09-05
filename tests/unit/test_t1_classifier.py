@@ -16,15 +16,15 @@ from collections.abc import Mapping
 
 import pytest
 
-from air_classifier.config import ClassifierSettings, Settings
-from air_classifier.constants import Label
-from air_classifier.constants import Tier as TierId
-from air_classifier.pipeline.features import extract_features
-from air_classifier.pipeline.tiers.base import Tier as TierProtocol
-from air_classifier.pipeline.tiers.base import TierContext, TierError
-from air_classifier.pipeline.tiers.scorers import LEXICON_SCORER_NAME, ScoreResult
-from air_classifier.pipeline.tiers.t1_classifier import ClassifierTier
-from air_classifier.schemas.common import LanguageInfo, Options, SafetyReport
+from air_classifier_service.config import ClassifierSettings, Settings
+from air_classifier_service.constants import Label
+from air_classifier_service.constants import Tier as TierId
+from air_classifier_service.pipeline.features import extract_features
+from air_classifier_service.pipeline.tiers.base import Tier as TierProtocol
+from air_classifier_service.pipeline.tiers.base import TierContext, TierError
+from air_classifier_service.pipeline.tiers.scorers import LEXICON_SCORER_NAME, ScoreResult
+from air_classifier_service.pipeline.tiers.t1_classifier import ClassifierTier
+from air_classifier_service.schemas.common import LanguageInfo, Options, SafetyReport
 
 CLEAR_POSITIVE = "Absolutely fantastic, superb service, I love it."
 CLEAR_NEGATIVE = "Absolutely terrible, broken on arrival, a total waste of money."

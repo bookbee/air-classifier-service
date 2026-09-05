@@ -14,10 +14,10 @@ import pytest
 import respx
 from pydantic import BaseModel, SecretStr
 
-from air_classifier.config import AirLlmSettings, Settings
-from air_classifier.constants import Provider
-from air_classifier.providers.air_llm_provider import AirLlmProvider
-from air_classifier.providers.base import (
+from air_classifier_service.config import AirLlmSettings, Settings
+from air_classifier_service.constants import Provider
+from air_classifier_service.providers.air_llm_provider import AirLlmProvider
+from air_classifier_service.providers.base import (
     ProviderRateLimitError,
     ProviderRefusalError,
     ProviderSchemaError,
@@ -215,7 +215,7 @@ async def test_classify_unconfigured_is_unavailable() -> None:
 
 
 def test_air_llm_mode_wires_the_ladder() -> None:
-    from air_classifier.main import build_ladder
+    from air_classifier_service.main import build_ladder
 
     ladder = build_ladder(_settings(enabled=True))
     assert ladder.providers  # T2 local + T3 cloud, both air-llm-backed
@@ -229,8 +229,8 @@ def test_both_llm_tiers_self_build_a_bulkhead_when_none_is_passed() -> None:
     missing bulkhead fails open (`guarded()` skips protection outright when
     `bulkhead is None`), so this has to be caught here, not from a symptom in
     production."""
-    from air_classifier.constants import Tier as TierId
-    from air_classifier.main import build_ladder
+    from air_classifier_service.constants import Tier as TierId
+    from air_classifier_service.main import build_ladder
 
     settings = _settings(enabled=True)
     ladder = build_ladder(settings)
@@ -248,8 +248,8 @@ def test_both_llm_tiers_self_build_a_bulkhead_when_none_is_passed() -> None:
 
 
 def test_disabled_air_llm_builds_no_llm_tiers() -> None:
-    from air_classifier.constants import Tier as TierId
-    from air_classifier.main import build_ladder
+    from air_classifier_service.constants import Tier as TierId
+    from air_classifier_service.main import build_ladder
 
     ladder = build_ladder(_settings(enabled=False))
     assert not any(p.configured for p in ladder.providers)

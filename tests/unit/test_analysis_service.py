@@ -13,10 +13,10 @@ from typing import Any, cast
 
 import pytest
 
-from air_classifier.audit.base import AuditEntry, AuditSink
-from air_classifier.cache.memory import MemoryCache
-from air_classifier.config import AppSettings, ClassifierSettings, Settings
-from air_classifier.constants import (
+from air_classifier_service.audit.base import AuditEntry, AuditSink
+from air_classifier_service.cache.memory import MemoryCache
+from air_classifier_service.config import AppSettings, ClassifierSettings, Settings
+from air_classifier_service.constants import (
     Actionability,
     Intent,
     Label,
@@ -27,8 +27,8 @@ from air_classifier.constants import (
     Topic,
     Urgency,
 )
-from air_classifier.pipeline.orchestrator import NoVerdictError, Orchestrator
-from air_classifier.pipeline.service import (
+from air_classifier_service.pipeline.orchestrator import NoVerdictError, Orchestrator
+from air_classifier_service.pipeline.service import (
     AnalysisService,
     _derive_actionability,
     _derive_requires_human,
@@ -37,9 +37,9 @@ from air_classifier.pipeline.service import (
     _derive_urgency,
     _rating_consistency,
 )
-from air_classifier.pipeline.tiers.base import TierContext
-from air_classifier.schemas.classify import ClassifyRequest
-from air_classifier.schemas.common import (
+from air_classifier_service.pipeline.tiers.base import TierContext
+from air_classifier_service.schemas.classify import ClassifyRequest
+from air_classifier_service.schemas.common import (
     Aspect,
     Emotion,
     LabeledScore,
@@ -47,8 +47,8 @@ from air_classifier.schemas.common import (
     SentimentResult,
     TierUsage,
 )
-from air_classifier.schemas.errors import ProblemDetail
-from air_classifier.schemas.verdict import (
+from air_classifier_service.schemas.errors import ProblemDetail
+from air_classifier_service.schemas.verdict import (
     EscalationStep,
     OrchestrationResult,
     TierVerdict,

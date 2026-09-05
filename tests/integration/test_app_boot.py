@@ -1,7 +1,7 @@
 """The assembled service, booted.
 
 Every other suite exercises one module behind fakes. This one starts the real
-application through :func:`air_classifier.main.create_app` — real lifespan, real
+application through :func:`air_classifier_service.main.create_app` — real lifespan, real
 middleware stack, real error handlers, real Tier 0 and Tier 1 — and asks the
 question none of the unit suites can: *does it come up at all, and does it come
 up honest about what it can do?*
@@ -35,31 +35,31 @@ from pydantic import SecretStr
 # Private, but it is the type structlog's own `get_logger` returns, and the
 # alternative — duck-typing on an attribute name — would be no more stable and
 # considerably less obvious.
-from air_classifier import __version__
-from air_classifier.api.deps import STATE_ATTR, AppState
-from air_classifier.api.errors import PROBLEM_CONTENT_TYPE
-from air_classifier.cache.memory import MemoryCache
-from air_classifier.config import (
+from air_classifier_service import __version__
+from air_classifier_service.api.deps import STATE_ATTR, AppState
+from air_classifier_service.api.errors import PROBLEM_CONTENT_TYPE
+from air_classifier_service.cache.memory import MemoryCache
+from air_classifier_service.config import (
     AirLlmSettings,
     AppSettings,
     CacheSettings,
     SecuritySettings,
     Settings,
 )
-from air_classifier.constants import HEADER_API_KEY, HEADER_REQUEST_ID
-from air_classifier.constants import Tier as TierId
-from air_classifier.main import STATE_ANALYSIS_SERVICE, create_app
-from air_classifier.pipeline.service import AnalysisService
-from air_classifier.pipeline.tiers.scorers import LEXICON_SCORER_NAME
-from air_classifier.schemas.classify import ClassificationResponse
-from air_classifier.schemas.summary import SummaryRefreshResponse
-from air_classifier.security.api_keys import ALL_SCOPES, hash_key
+from air_classifier_service.constants import HEADER_API_KEY, HEADER_REQUEST_ID
+from air_classifier_service.constants import Tier as TierId
+from air_classifier_service.main import STATE_ANALYSIS_SERVICE, create_app
+from air_classifier_service.pipeline.service import AnalysisService
+from air_classifier_service.pipeline.tiers.scorers import LEXICON_SCORER_NAME
+from air_classifier_service.schemas.classify import ClassificationResponse
+from air_classifier_service.schemas.summary import SummaryRefreshResponse
+from air_classifier_service.security.api_keys import ALL_SCOPES, hash_key
 
 #: Presented as ``X-API-Key``. Real auth rather than
 #: ``security.allow_unauthenticated``: the anonymous identity takes a different
 #: branch through the key store, and this suite is about the wiring a deployment
 #: actually runs.
-RAW_API_KEY: Final[str] = "air-classifier-boot-test-key"
+RAW_API_KEY: Final[str] = "air-classifier-service-boot-test-key"
 _SALT: Final[str] = "app-boot-test-salt"
 
 AUTH: Final[dict[str, str]] = {HEADER_API_KEY: RAW_API_KEY}
@@ -242,7 +242,11 @@ def test_health_is_up(client: TestClient) -> None:
     response = client.get("/v1/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": "air-classifier", "version": __version__}
+    assert response.json() == {
+        "status": "ok",
+        "service": "air-classifier-service",
+        "version": __version__,
+    }
 
 
 def test_ready_is_ok_when_every_registered_rung_answers(client: TestClient) -> None:

@@ -28,29 +28,29 @@ import time
 
 import pytest
 
-from air_classifier.config import Settings
-from air_classifier.constants import EscalationReason, Label, Provider
-from air_classifier.constants import Tier as TierId
-from air_classifier.pipeline.features import extract_features
-from air_classifier.pipeline.orchestrator import NoVerdictError, Orchestrator
-from air_classifier.pipeline.policy import EscalationPolicy
-from air_classifier.pipeline.tiers.base import (
+from air_classifier_service.config import Settings
+from air_classifier_service.constants import EscalationReason, Label, Provider
+from air_classifier_service.constants import Tier as TierId
+from air_classifier_service.pipeline.features import extract_features
+from air_classifier_service.pipeline.orchestrator import NoVerdictError, Orchestrator
+from air_classifier_service.pipeline.policy import EscalationPolicy
+from air_classifier_service.pipeline.tiers.base import (
     Tier,
     TierContext,
     TierError,
     TierUnavailableError,
 )
-from air_classifier.pipeline.tiers.t0_rules import RulesTier
-from air_classifier.pipeline.tiers.t1_classifier import ClassifierTier
-from air_classifier.pipeline.tiers.t2_local_llm import LocalLLMTier
-from air_classifier.pipeline.tiers.t3_cloud_llm import CloudLLMTier
-from air_classifier.preprocess.language import detect_language
-from air_classifier.preprocess.lexicon import score_text
-from air_classifier.preprocess.normalize import normalize
-from air_classifier.providers.air_llm_provider import AirLlmProvider
-from air_classifier.providers.base import LLMProvider
-from air_classifier.schemas.common import Options, SafetyReport, SentimentResult
-from air_classifier.schemas.verdict import OrchestrationResult, TierVerdict
+from air_classifier_service.pipeline.tiers.t0_rules import RulesTier
+from air_classifier_service.pipeline.tiers.t1_classifier import ClassifierTier
+from air_classifier_service.pipeline.tiers.t2_local_llm import LocalLLMTier
+from air_classifier_service.pipeline.tiers.t3_cloud_llm import CloudLLMTier
+from air_classifier_service.preprocess.language import detect_language
+from air_classifier_service.preprocess.lexicon import score_text
+from air_classifier_service.preprocess.normalize import normalize
+from air_classifier_service.providers.air_llm_provider import AirLlmProvider
+from air_classifier_service.providers.base import LLMProvider
+from air_classifier_service.schemas.common import Options, SafetyReport, SentimentResult
+from air_classifier_service.schemas.verdict import OrchestrationResult, TierVerdict
 
 pytestmark = pytest.mark.integration
 

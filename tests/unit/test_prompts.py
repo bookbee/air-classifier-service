@@ -15,10 +15,10 @@ import time
 import pytest
 from structlog.testing import capture_logs
 
-from air_classifier.constants import Label, Tier
-from air_classifier.pipeline.features import extract_features
-from air_classifier.pipeline.tiers.base import TierContext
-from air_classifier.providers.prompts.loader import (
+from air_classifier_service.constants import Label, Tier
+from air_classifier_service.pipeline.features import extract_features
+from air_classifier_service.pipeline.tiers.base import TierContext
+from air_classifier_service.providers.prompts.loader import (
     CLOUD_MIN_CACHEABLE_TOKENS,
     compact_system_prompt,
     compact_system_prompt_version,
@@ -29,8 +29,8 @@ from air_classifier.providers.prompts.loader import (
     system_prompt_version,
     user_content,
 )
-from air_classifier.schemas.classify import MAX_TEXT_CHARS
-from air_classifier.schemas.common import (
+from air_classifier_service.schemas.classify import MAX_TEXT_CHARS
+from air_classifier_service.schemas.common import (
     LanguageInfo,
     Options,
     PIIFinding,
@@ -38,7 +38,7 @@ from air_classifier.schemas.common import (
     SentimentResult,
     TierUsage,
 )
-from air_classifier.schemas.verdict import TierVerdict
+from air_classifier_service.schemas.verdict import TierVerdict
 
 TEXT = "Great battery but the camera is awful."
 

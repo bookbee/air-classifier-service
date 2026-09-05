@@ -20,21 +20,21 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, SecretStr
 
-from air_classifier.config import AirLlmSettings, AppSettings, ResilienceSettings, Settings
-from air_classifier.constants import Label, Provider
-from air_classifier.pipeline.features import extract_features
-from air_classifier.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
-from air_classifier.pipeline.tiers.t3_cloud_llm import CloudLLMTier
-from air_classifier.providers.base import (
+from air_classifier_service.config import AirLlmSettings, AppSettings, ResilienceSettings, Settings
+from air_classifier_service.constants import Label, Provider
+from air_classifier_service.pipeline.features import extract_features
+from air_classifier_service.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
+from air_classifier_service.pipeline.tiers.t3_cloud_llm import CloudLLMTier
+from air_classifier_service.providers.base import (
     ProviderRefusalError,
     ProviderResult,
     ProviderSchemaError,
     ProviderUnavailableError,
 )
-from air_classifier.resilience.breaker import CircuitBreaker
-from air_classifier.resilience.bulkhead import Bulkhead
-from air_classifier.schemas.common import LanguageInfo, Options, SafetyReport
-from air_classifier.schemas.verdict import LLMSentimentOutput
+from air_classifier_service.resilience.breaker import CircuitBreaker
+from air_classifier_service.resilience.bulkhead import Bulkhead
+from air_classifier_service.schemas.common import LanguageInfo, Options, SafetyReport
+from air_classifier_service.schemas.verdict import LLMSentimentOutput
 
 TEXT = "Great battery but the camera is awful."
 HAIKU = "claude-haiku-4-5"

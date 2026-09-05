@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from air_classifier.schemas.summary import (
+from air_classifier_service.schemas.summary import (
     RECENT_RATINGS_WINDOW,
     CustomerSummary,
     SummaryItem,

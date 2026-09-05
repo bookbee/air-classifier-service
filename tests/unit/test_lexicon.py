@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from air_classifier.preprocess.lexicon import (
+from air_classifier_service.preprocess.lexicon import (
     CONTRASTIVE_MARKERS,
     DIMINISHERS,
     EMOJI_POLARITY,

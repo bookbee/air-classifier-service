@@ -18,31 +18,31 @@ from typing import Any
 
 import pytest
 
-from air_classifier.config import (
+from air_classifier_service.config import (
     AirLlmSettings,
     AppSettings,
     Settings,
     TierSettings,
     TiersSettings,
 )
-from air_classifier.constants import Label, Provider, Tier
-from air_classifier.observability import metrics
-from air_classifier.pipeline.features import extract_features
-from air_classifier.pipeline.tiers import base as tier_base
-from air_classifier.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
-from air_classifier.pipeline.tiers.t2_local_llm import LocalLLMTier
-from air_classifier.providers.base import (
+from air_classifier_service.constants import Label, Provider, Tier
+from air_classifier_service.observability import metrics
+from air_classifier_service.pipeline.features import extract_features
+from air_classifier_service.pipeline.tiers import base as tier_base
+from air_classifier_service.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
+from air_classifier_service.pipeline.tiers.t2_local_llm import LocalLLMTier
+from air_classifier_service.providers.base import (
     ProviderRateLimitError,
     ProviderRefusalError,
     ProviderResult,
     ProviderSchemaError,
     ProviderUnavailableError,
 )
-from air_classifier.providers.prompts.loader import compact_system_prompt, system_prompt
-from air_classifier.resilience.breaker import CircuitBreaker
-from air_classifier.resilience.bulkhead import Bulkhead
-from air_classifier.schemas.common import Emotion, LanguageInfo, Options, SafetyReport
-from air_classifier.schemas.verdict import LLMSentimentOutput
+from air_classifier_service.providers.prompts.loader import compact_system_prompt, system_prompt
+from air_classifier_service.resilience.breaker import CircuitBreaker
+from air_classifier_service.resilience.bulkhead import Bulkhead
+from air_classifier_service.schemas.common import Emotion, LanguageInfo, Options, SafetyReport
+from air_classifier_service.schemas.verdict import LLMSentimentOutput
 
 TEXT = "Great battery but the camera is awful."
 MODEL = "llama3.2:3b"

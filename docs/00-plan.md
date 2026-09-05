@@ -1,4 +1,4 @@
-# AIR Classifier — Plan
+# AIR Classifier Service — Plan
 
 **Status:** Draft for review · **Owner:** Vikas Roy · **Date:** 2026-08-08
 
@@ -6,7 +6,7 @@
 
 ## 1. Problem statement
 
-`air-classifier` is the AIR platform's sentiment assessment service. It accepts arbitrary
+`air-classifier-service` is the AIR platform's sentiment assessment service. It accepts arbitrary
 user-authored text — plus surrounding context and metadata — and returns a structured,
 explainable sentiment verdict over a REST API.
 
@@ -73,6 +73,19 @@ climbed only when the rung below is not confident enough.
    who have their own upstream redaction, and gives the operator a hard lever per key.
    Redaction always runs before any text leaves the process, and the outcome is reported in
    `safety.pii_redacted`.
+
+### Addendum — decided after this plan
+
+4. **Customer-summary refresh — stateless, added 2026-09-05.** `POST /v1/summary/refresh` lets
+   a caller fold new feedback/review items into a caller-held rolling summary (a narrative plus
+   a structured rollup) without this service persisting anything — §3's "no datastore" stance
+   holds unchanged; the caller owns storage and resends the summary each call. See
+   `docs/01-hld.md` §4 and `docs/02-lld.md` for the full contract.
+5. **Optional audit log — added 2026-09-05.** A MongoDB-backed, TTL-expiring log of
+   classification jobs (redacted text + verdict) for support review, off by default
+   (`AuditSettings.backend = "none"`). This is operational tooling, not the datastore §3 rules
+   out — no verdict, cache, or customer data lives there, only a support-facing activity trail
+   that self-expires. See `docs/02-lld.md`.
 
 ## 5. Phased delivery
 

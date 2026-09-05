@@ -142,7 +142,7 @@ if want climb; then
   AIR_CLASSIFIER__TIERS__T1_CLASSIFIER__CONFIDENCE_FLOOR=0.99 \
   AIR_CLASSIFIER__TIERS__T2_LOCAL_LLM__CONFIDENCE_FLOOR=0.99 \
   AIR_CLASSIFIER__CACHE__BACKEND=none \
-    .venv/bin/uvicorn air_classifier.main:create_app --factory \
+    .venv/bin/uvicorn air_classifier_service.main:create_app --factory \
       --host 127.0.0.1 --port "$port" >/tmp/air-climb.log 2>&1 &
   climb_pid=$!
   trap 'kill $climb_pid 2>/dev/null' EXIT

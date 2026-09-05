@@ -6,9 +6,9 @@ from __future__ import annotations
 import prometheus_client
 import pytest
 
-from air_classifier.constants import EscalationReason, PIIKind, Provider, Tier
-from air_classifier.observability import metrics
-from air_classifier.observability.metrics import BreakerState, CacheEvent, TierOutcome
+from air_classifier_service.constants import EscalationReason, PIIKind, Provider, Tier
+from air_classifier_service.observability import metrics
+from air_classifier_service.observability.metrics import BreakerState, CacheEvent, TierOutcome
 
 CATALOGUE = (
     "air_classifier_requests_total",

@@ -5,7 +5,7 @@ PYTEST  := $(VENV)/bin/pytest
 UVICORN := $(VENV)/bin/uvicorn
 COMPOSE ?= docker compose
 
-IMAGE   ?= air-classifier
+IMAGE   ?= air-classifier-service
 TAG     ?= dev
 HOST    ?= 127.0.0.1
 # 8082 in the AIR port map: 8080 is air-infra, 8081 is air-platform, 8083 is
@@ -33,7 +33,7 @@ SOURCES := src tests scripts
         lint fmt typecheck check image up down logs clean openapi doctor infra-check
 
 help: ## Show this help
-	@echo "air-classifier — make <target>"
+	@echo "air-classifier-service — make <target>"
 	@echo
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -55,13 +55,13 @@ env: ## Create .env from .env.example if it does not exist yet
 		|| { cp .env.example .env; echo ".env created. Local API key: airc_local_dev_key"; }
 
 run: env ## Serve in this terminal with autoreload; Ctrl+C stops it
-	$(UVICORN) air_classifier.main:create_app --factory --reload --host $(HOST) --port $(PORT)
+	$(UVICORN) air_classifier_service.main:create_app --factory --reload --host $(HOST) --port $(PORT)
 
 start: env ## Serve in the background, logging to .run/service.log
 	@if [ -n "$$($(LISTENER))" ]; then \
 		echo "already serving on :$(PORT) — 'make restart' to replace it"; exit 1; fi
 	@mkdir -p $(dir $(SERVE_LOG))
-	@nohup $(UVICORN) air_classifier.main:create_app --factory --reload \
+	@nohup $(UVICORN) air_classifier_service.main:create_app --factory --reload \
 		--host $(HOST) --port $(PORT) > $(SERVE_LOG) 2>&1 & \
 		sleep 3; echo "serving http://$(HOST):$(PORT) · logs: $(SERVE_LOG)"
 
@@ -108,7 +108,7 @@ typecheck: ## mypy --strict
 check: lint typecheck test ## Everything CI runs
 
 openapi: ## Write the OpenAPI 3.1 spec to docs/openapi.json
-	$(PY) -c "import json, pathlib; from air_classifier.main import create_app; \
+	$(PY) -c "import json, pathlib; from air_classifier_service.main import create_app; \
 		pathlib.Path('docs/openapi.json').write_text(json.dumps(create_app().openapi(), indent=2) + '\n')"
 	@echo "wrote docs/openapi.json"
 
@@ -135,7 +135,7 @@ down: ## Stop this service. Shared dependencies keep running in air-infra/air-ll
 	$(COMPOSE) down --remove-orphans
 
 logs: ## Tail the app's logs
-	$(COMPOSE) logs -f --tail=100 air-classifier
+	$(COMPOSE) logs -f --tail=100 air-classifier-service
 
 doctor: ## Check this service's dependencies are reachable
 	@NETWORK=$(NETWORK) INFRA_DIR=$(INFRA_DIR) AIR_LLM_DIR=$(AIR_LLM_DIR) \

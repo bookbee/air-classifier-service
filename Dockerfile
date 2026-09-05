@@ -25,7 +25,7 @@ WORKDIR /build
 # Dependencies resolve from pyproject alone. A stub package satisfies hatchling
 # so this layer — the expensive one — survives every source edit.
 COPY pyproject.toml README.md ./
-RUN mkdir -p src/air_classifier && touch src/air_classifier/__init__.py
+RUN mkdir -p src/air_classifier_service && touch src/air_classifier_service/__init__.py
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && pip install ".[all]"
 
@@ -92,9 +92,9 @@ FROM ${PYTHON_IMAGE} AS runtime
 ARG VENV
 ARG MODEL_DIR
 
-LABEL org.opencontainers.image.title="air-classifier" \
+LABEL org.opencontainers.image.title="air-classifier-service" \
       org.opencontainers.image.description="Layered text classification with cost-aware escalation" \
-      org.opencontainers.image.source="https://github.com/bookbee/air-classifier" \
+      org.opencontainers.image.source="https://github.com/bookbee/air-classifier-service" \
       org.opencontainers.image.licenses="Proprietary"
 
 ENV PYTHONUNBUFFERED=1 \
@@ -122,5 +122,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/v1/health', timeout=2).read()"]
 
-ENTRYPOINT ["uvicorn", "air_classifier.main:create_app", "--factory", \
+ENTRYPOINT ["uvicorn", "air_classifier_service.main:create_app", "--factory", \
             "--host", "0.0.0.0", "--port", "8080", "--proxy-headers"]

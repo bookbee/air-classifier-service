@@ -16,21 +16,21 @@ from pathlib import Path
 
 import pytest
 
-from air_classifier.config import AppSettings, Settings, TiersSettings
-from air_classifier.constants import Label, Tier
-from air_classifier.observability import metrics
-from air_classifier.pipeline import orchestrator as orchestrator_module
-from air_classifier.pipeline.orchestrator import NoVerdictError, Orchestrator
-from air_classifier.pipeline.policy import EscalationPolicy
-from air_classifier.pipeline.tiers.base import (
+from air_classifier_service.config import AppSettings, Settings, TiersSettings
+from air_classifier_service.constants import Label, Tier
+from air_classifier_service.observability import metrics
+from air_classifier_service.pipeline import orchestrator as orchestrator_module
+from air_classifier_service.pipeline.orchestrator import NoVerdictError, Orchestrator
+from air_classifier_service.pipeline.policy import EscalationPolicy
+from air_classifier_service.pipeline.tiers.base import (
     Tier as TierProtocol,
 )
-from air_classifier.pipeline.tiers.base import (
+from air_classifier_service.pipeline.tiers.base import (
     TierContext,
     TierError,
     TierUnavailableError,
 )
-from air_classifier.schemas.common import (
+from air_classifier_service.schemas.common import (
     ComplexityFeatures,
     LanguageInfo,
     Options,
@@ -38,7 +38,7 @@ from air_classifier.schemas.common import (
     SentimentResult,
     TierUsage,
 )
-from air_classifier.schemas.verdict import TierVerdict
+from air_classifier_service.schemas.verdict import TierVerdict
 
 # ── Scripted rungs ────────────────────────────────────────────────────────────
 

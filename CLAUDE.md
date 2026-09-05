@@ -101,6 +101,17 @@ always stays `false`.
 - **`providers/air_llm_provider.py`** is the only code that talks to air-llm; `providers/prompts/`
   holds the system prompts T2/T3 send, loaded via `prompts/loader.py`, which decides — based on
   the request — which optional fields (tone/topics/intent) to even ask the model for.
+- **`POST /v1/summary/refresh`** (`api/v1/summary.py`, `pipeline/summary_service.py`) is a second,
+  stateless entry point: given a caller-supplied `existing_summary` (or none) plus new
+  feedback/review items, it classifies each item through `AnalysisService.analyse_batch`,
+  deterministically merges the rollup, and refreshes a narrative through its own guarded air-llm
+  call (`AIR_LLM__SUMMARY_MODEL`, a dedicated bulkhead/breaker). This service persists nothing —
+  the caller stores and resends `summary`. A narrative-refresh failure degrades
+  (`degraded: true`, prior narrative unchanged); it never fails the request.
+- **`audit/`** is an optional MongoDB-backed operational log of classification jobs (redacted
+  text + verdict, TTL-expiring), unrelated to the summary feature above — wired into
+  `AnalysisService.analyse()` as a fire-and-forget write behind a bounded queue. Controlled by
+  `AuditSettings` (`config.py`); defaults to off (`backend: "none"`).
 
 ### Config
 

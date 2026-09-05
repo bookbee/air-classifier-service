@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "air-classifier"
+name = "air-classifier-service"
 version = "0.1.0"
-description = "AIR Classifier — layered text classification with cost-aware escalation"
+description = "AIR Classifier Service — layered text classification with cost-aware escalation"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
@@ -36,7 +36,7 @@ otel = [
 ]
 # Everything a production image needs.
 all = [
-    "air-classifier[redis,mongo,onnx,otel]",
+    "air-classifier-service[redis,mongo,onnx,otel]",
 ]
 dev = [
     "pytest>=8.3",
@@ -49,10 +49,10 @@ dev = [
 ]
 
 [project.scripts]
-air-classifier = "air_classifier.__main__:main"
+air-classifier-service = "air_classifier_service.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/air_classifier"]
+packages = ["src/air_classifier_service"]
 
 # ── Ruff ──────────────────────────────────────────────────────────────────────
 [tool.ruff]
@@ -85,7 +85,7 @@ ignore = [
 "scripts/**" = ["T20"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["air_classifier"]
+known-first-party = ["air_classifier_service"]
 
 # ── mypy ──────────────────────────────────────────────────────────────────────
 [tool.mypy]
@@ -94,7 +94,7 @@ strict = true
 warn_unreachable = true
 plugins = ["pydantic.mypy"]
 mypy_path = "src"
-packages = ["air_classifier"]
+packages = ["air_classifier_service"]
 
 [[tool.mypy.overrides]]
 # The `otel` extra is optional, so these must type-check whether or not it is
@@ -121,7 +121,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["src/air_classifier"]
+source = ["src/air_classifier_service"]
 branch = true
 
 [tool.coverage.report]

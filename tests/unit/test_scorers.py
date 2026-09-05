@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from air_classifier.config import ClassifierSettings, Settings
-from air_classifier.constants import Label
-from air_classifier.pipeline.tiers import scorers
-from air_classifier.pipeline.tiers.scorers import (
+from air_classifier_service.config import ClassifierSettings, Settings
+from air_classifier_service.constants import Label
+from air_classifier_service.pipeline.tiers import scorers
+from air_classifier_service.pipeline.tiers.scorers import (
     LEXICON_SCORER_NAME,
     SCORED_LABELS,
     LexiconScorer,

@@ -1,4 +1,4 @@
-# AIR Classifier — Overview
+# AIR Classifier Service — Overview
 
 **For:** a team presentation, and whoever picks this project up next.
 **Detail lives elsewhere:** this is the map, not the territory — see [00-plan.md](00-plan.md)
@@ -14,7 +14,7 @@ broken." A minority is genuinely hard: sarcasm, mixed sentiment, negation chains
 praise. Routing 100% of traffic to a cloud LLM is the naive answer: accurate, and two to
 three orders of magnitude more expensive and slower than the easy cases need.
 
-air-classifier exists to make **cost and confidence a dial, not a coin flip**: a request
+air-classifier-service exists to make **cost and confidence a dial, not a coin flip**: a request
 enters at the cheapest tier and climbs only as far as it has to. Every rung costs more and
 answers better than the one below it; the service's whole job is deciding, per request, when
 that trade is worth making.
@@ -27,7 +27,7 @@ platform's model gateway.
 ## 2. Architecture
 
 ```
-Caller → air-classifier
+Caller → air-classifier-service
            │
            ├─ Tier 0  rules/lexicon shortcuts        (in-process, ~0ms, free)
            ├─ Tier 1  local ONNX classifier           (in-process, ~200ms, free)
@@ -75,11 +75,13 @@ exercised in tests with four fakes and no network.
 
 | Layer | What it is |
 | --- | --- |
-| API | FastAPI; `/v1/classify`, `/v1/health`, `/v1/ready`, `/v1/capabilities`, `/metrics`; API-key auth, idempotency, RFC 9457 errors |
+| API | FastAPI; `/v1/classify`, `/v1/classify/batch`, `/v1/summary/refresh`, `/v1/health`, `/v1/ready`, `/v1/capabilities`, `/metrics`; API-key auth, idempotency, RFC 9457 errors |
 | Orchestration | `Orchestrator` runs the ladder; `EscalationPolicy` is a pure, fully-tested rule table (11 rules) deciding stop-vs-climb after every tier |
 | Tier 0 | Deterministic rules + lexicon shortcuts |
 | Tier 1 | Zero-shot NLI ONNX classifier (INT8, per-channel quantized) blended with the lexicon; falls back to lexicon-only if the artifact isn't mounted |
 | Tier 2 / 3 | One `AirLlmProvider` adapter, one call — `POST /v1/inference` on air-llm; Tier 3 additionally arbitrates to a stronger model when confidence is still low |
+| Summary refresh | `/v1/summary/refresh` — stateless: classifies new items via the same ladder, merges a rollup, refreshes a narrative through a separately-guarded air-llm call that degrades (never fails) on its own |
+| Audit log | Optional, off by default: MongoDB-backed, TTL-expiring record of classification jobs for support review — fire-and-forget, never affects a response (`audit/`) |
 | Resilience | Timeout + circuit breaker + bulkhead per remote dependency (`resilience/`) |
 | Observability | `structlog` JSON logs, OpenTelemetry traces, Prometheus metrics, cost attribution straight from air-llm's own reported `cost_usd` (no local price table) |
 | Config | `pydantic-settings`, 12-factor via env vars, every key documented in `.env.example` |
@@ -91,7 +93,7 @@ Full endpoint/config/testing reference: [02-lld.md](02-lld.md).
 
 This story is strongest performed live, in this order — it was run end-to-end this way
 during final review and every transition below was verified with **zero restarts** of
-air-classifier itself:
+air-classifier-service itself:
 
 1. **Start clean.** `make up` here, plus air-infra and air-llm up. `bash scripts/doctor.sh`
    confirms everything is reachable before you start talking.
@@ -107,7 +109,7 @@ air-classifier itself:
      → escalates to **T3** for arbitration — damning praise a cheaper model reads as
      positive.
 3. **The resilience story — the part worth building the demo around.** Stop air-infra and
-   air-llm entirely (air-classifier keeps running — it has no `depends_on` on either).
+   air-llm entirely (air-classifier-service keeps running — it has no `depends_on` on either).
    Re-run the sarcasm case: T0/T1 still answer instantly; the natural (unpinned) request
    climbs, finds nothing above T1, and returns `200` with `degraded: true` and
    `escalated_because: "next_tier_unavailable"` — not a 503, not a hang. Show
@@ -135,7 +137,7 @@ explicitly called out as unbuilt in `00-plan.md`:
 | No integrity/abuse/spam-style heads | Only sentiment/tone/urgency/intent/aspects today | Would be a genuinely new taxonomy dimension, not an incremental addition — see roadmap |
 | Docker Compose only | No Kubernetes manifests, no HPA, no NetworkPolicy | Real gap only if/when a cluster rollout is actually next |
 | Batch is synchronous only | `/v1/classify/batch` is bounded by `app.max_batch_items`, not a job queue | Fine at current scale; becomes a real limit if batch volume or per-item latency grows |
-| No persistence beyond cache | No usage ledger, no label-feedback table for retraining, no audit store beyond logs | Deliberate (`00-plan.md` §3); revisit only if a consumer needs queryable history, not just logs |
+| No persistence beyond cache and the optional audit log | No usage ledger, no label-feedback table for retraining. The audit log (`audit/`, off by default) is a support-facing operational record, not queryable customer history or a datastore in the §3 sense | Deliberate (`00-plan.md` §3); revisit only if a consumer needs queryable history beyond what the audit log already gives support |
 
 ## 7. Future roadmap
 

@@ -1,4 +1,4 @@
-# air-classifier — this service, and nothing else.
+# air-classifier-service — this service, and nothing else.
 #
 # Redis and Prometheus are shared platform components owned by air-infra and
 # are NOT started here. This file joins air-infra's `air-net` network and
@@ -15,19 +15,19 @@
 # In production none of this applies: DevOps supplies every endpoint below as an
 # environment variable against managed instances, and the compose file is not
 # deployed at all.
-name: air-classifier
+name: air-classifier-service
 
 services:
-  air-classifier:
+  air-classifier-service:
     build:
       context: .
       target: runtime
-    image: air-classifier:local
+    image: air-classifier-service:local
     ports:
       # Host side is 8082, this service's slot in the AIR port map
       # (air-infra/README.md). Container side stays 8080 — pinned by the
       # Dockerfile, and the port air-infra's prometheus scrapes on the host.
-      - "${AIR_CLASSIFIER_PORT:-8082}:8080"
+      - "${AIR_CLASSIFIER_SERVICE_PORT:-8082}:8080"
     # Lets the container reach a natively-run dependency on the developer's
     # laptop. Required on Linux; Docker Desktop provides the name and ignores it.
     extra_hosts:
@@ -50,10 +50,10 @@ services:
       # is baked in — raw value `airc_local_dev_key`, hashed against the dev salt
       # below — so callers such as air-client exercise the real auth path rather
       # than an anonymous bypass. Both values are overridden in any real deploy.
-      AIR_CLASSIFIER__SECURITY__HASH_SALT: air-classifier-dev-salt
+      AIR_CLASSIFIER__SECURITY__HASH_SALT: air-classifier-service-dev-salt
       AIR_CLASSIFIER__SECURITY__API_KEYS_INLINE: >-
         [{"id":"local-dev","name":"Local development",
-        "key_hash":"28b8a28925728a98c146e8463153abf3d30f4171ab4b536e7bde71c8975976be",
+        "key_hash":"9ad4d249e63199d6a383fca073629b7f24bafefb682ddeb9c27c641bdfbd855e",
         "scopes":["classify:read","admin:read"]}]
       AIR_CLASSIFIER__SECURITY__ALLOW_UNAUTHENTICATED: "false"
       # Tier 1. `./models` is bind-mounted above at /opt/models; the Dockerfile's

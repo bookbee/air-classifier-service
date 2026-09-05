@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from air_classifier.preprocess.language import MIN_DETECTION_CHARS, detect_language
+from air_classifier_service.preprocess.language import MIN_DETECTION_CHARS, detect_language
 
 LATIN_CASES: list[tuple[str, str]] = [
     ("The battery life is great but the camera is awful.", "en"),

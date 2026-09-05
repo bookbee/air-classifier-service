@@ -22,9 +22,9 @@ import structlog
 # considerably less obvious.
 from structlog._config import BoundLoggerLazyProxy
 
-from air_classifier.cache.memory import MemoryCache
-from air_classifier.config import AppSettings, Settings, get_settings
-from air_classifier.observability import logging as obs_logging
+from air_classifier_service.cache.memory import MemoryCache
+from air_classifier_service.config import AppSettings, Settings, get_settings
+from air_classifier_service.observability import logging as obs_logging
 
 
 @pytest.fixture(autouse=True)
@@ -129,7 +129,7 @@ def _release_memoised_loggers() -> None:
     up at the source instead of being left for the next author to find.
     """
     for name, module in list(sys.modules.items()):
-        if not name.startswith("air_classifier"):
+        if not name.startswith("air_classifier_service"):
             continue
         for value in vars(module).values():
             if isinstance(value, BoundLoggerLazyProxy):

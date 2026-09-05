@@ -42,22 +42,22 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from air_classifier.config import (
+from air_classifier_service.config import (
     AirLlmSettings,
     AppSettings,
     CacheSettings,
     SecuritySettings,
     Settings,
 )
-from air_classifier.constants import HEADER_API_KEY
-from air_classifier.main import create_app
-from air_classifier.security.api_keys import ALL_SCOPES, hash_key
+from air_classifier_service.constants import HEADER_API_KEY
+from air_classifier_service.main import create_app
+from air_classifier_service.security.api_keys import ALL_SCOPES, hash_key
 
 _GOLDEN_SET_PATH: Final[Path] = (
     Path(__file__).resolve().parents[2] / "evals" / "golden_set.jsonl"
 )
 
-RAW_API_KEY: Final[str] = "air-classifier-eval-key"
+RAW_API_KEY: Final[str] = "air-classifier-service-eval-key"
 _SALT: Final[str] = "eval-test-salt"
 AUTH: Final[dict[str, str]] = {HEADER_API_KEY: RAW_API_KEY}
 

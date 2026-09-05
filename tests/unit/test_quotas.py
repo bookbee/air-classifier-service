@@ -7,9 +7,9 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
-from air_classifier.config import CacheSettings, SecuritySettings, Settings
-from air_classifier.security.api_keys import ApiKeyRecord, hash_key
-from air_classifier.security.quotas import WINDOW_SECONDS, RateLimiter, TokenBucket
+from air_classifier_service.config import CacheSettings, SecuritySettings, Settings
+from air_classifier_service.security.api_keys import ApiKeyRecord, hash_key
+from air_classifier_service.security.quotas import WINDOW_SECONDS, RateLimiter, TokenBucket
 
 
 class FakeCache:

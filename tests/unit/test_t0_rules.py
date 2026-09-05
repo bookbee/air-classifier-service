@@ -14,16 +14,16 @@ from typing import Any
 
 import pytest
 
-from air_classifier.config import Settings
-from air_classifier.constants import EscalationReason, Label, Tier
-from air_classifier.pipeline.features import extract_features
-from air_classifier.pipeline.tiers.base import Tier as TierProtocol
-from air_classifier.pipeline.tiers.base import TierContext
-from air_classifier.pipeline.tiers.t0_rules import MODEL_VERSION, RulesTier, Shortcut
-from air_classifier.preprocess.language import detect_language
-from air_classifier.preprocess.lexicon import score_text
-from air_classifier.schemas.common import LanguageInfo, Options, SafetyReport
-from air_classifier.schemas.verdict import TierVerdict
+from air_classifier_service.config import Settings
+from air_classifier_service.constants import EscalationReason, Label, Tier
+from air_classifier_service.pipeline.features import extract_features
+from air_classifier_service.pipeline.tiers.base import Tier as TierProtocol
+from air_classifier_service.pipeline.tiers.base import TierContext
+from air_classifier_service.pipeline.tiers.t0_rules import MODEL_VERSION, RulesTier, Shortcut
+from air_classifier_service.preprocess.language import detect_language
+from air_classifier_service.preprocess.lexicon import score_text
+from air_classifier_service.schemas.common import LanguageInfo, Options, SafetyReport
+from air_classifier_service.schemas.verdict import TierVerdict
 
 
 def make_ctx(

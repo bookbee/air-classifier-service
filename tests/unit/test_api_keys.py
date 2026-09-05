@@ -10,9 +10,9 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
-from air_classifier.config import SecuritySettings, Settings
-from air_classifier.constants import Tier
-from air_classifier.security.api_keys import (
+from air_classifier_service.config import SecuritySettings, Settings
+from air_classifier_service.constants import Tier
+from air_classifier_service.security.api_keys import (
     ALL_SCOPES,
     ANONYMOUS_KEY_ID,
     KEY_PREFIX,

@@ -1,4 +1,4 @@
-# AIR Classifier — High-Level Design
+# AIR Classifier Service — High-Level Design
 
 **Status:** Draft for review · **Companion docs:** [Plan](00-plan.md) · [LLD](02-lld.md)
 
@@ -10,10 +10,10 @@
    air-client / air-platform / external callers
                      │  HTTPS + X-API-Key
                      ▼
-        ┌────────────────────────────────┐
-        │      air-classifier (this)      │
-        │  FastAPI · stateless · Docker  │
-        └───┬────────────────────┬────────┘
+        ┌─────────────────────────────────┐
+        │  air-classifier-service (this)  │
+        │  FastAPI · stateless · Docker   │
+        └───┬─────────────────────┬────────┘
             │ in-proc            │ HTTPS + X-API-Key
             │ cache (optional)   ▼
             ▼             ┌──────────────────┐
@@ -271,6 +271,11 @@ ladder can be exercised with four fake tiers and no network.
 - **Cost** — air-llm reports the authoritative `cost_usd` for each call it serves; this
   service holds no price table of its own, it folds that figure into a running per-request
   spend, exported as both a counter and a response field.
+- **Audit log (optional)** — a MongoDB-backed, TTL-expiring record of classification jobs
+  (redacted text plus verdict) for support review, off by default. Written fire-and-forget
+  behind a bounded queue, so a slow or unreachable Mongo degrades to dropped entries rather
+  than adding request latency — the same optional-dependency contract Redis and air-llm
+  already have with this service.
 
 ## 8. Deployment
 

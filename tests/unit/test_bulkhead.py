@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from air_classifier.resilience.bulkhead import Bulkhead, BulkheadFullError
+from air_classifier_service.resilience.bulkhead import Bulkhead, BulkheadFullError
 
 
 class BoomError(Exception):

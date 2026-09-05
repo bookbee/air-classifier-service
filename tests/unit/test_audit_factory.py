@@ -7,11 +7,11 @@ from typing import Any
 
 import pytest
 
-from air_classifier.audit.base import AuditEntry, AuditSink
-from air_classifier.audit.factory import NullAuditSink, build_audit_sink
-from air_classifier.audit.mongo import MongoAuditSink
-from air_classifier.config import AuditSettings, Settings
-from air_classifier.constants import Tier
+from air_classifier_service.audit.base import AuditEntry, AuditSink
+from air_classifier_service.audit.factory import NullAuditSink, build_audit_sink
+from air_classifier_service.audit.mongo import MongoAuditSink
+from air_classifier_service.config import AuditSettings, Settings
+from air_classifier_service.constants import Tier
 
 
 def settings_with(**audit_kwargs: Any) -> Settings:

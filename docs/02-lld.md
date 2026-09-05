@@ -1,4 +1,4 @@
-# AIR Classifier — Low-Level Design
+# AIR Classifier Service — Low-Level Design
 
 **Status:** Draft for review · **Companion docs:** [Plan](00-plan.md) · [HLD](01-hld.md)
 
@@ -12,7 +12,7 @@ describes the system as it stands today, not as it was first drafted.
 ## 1. Repository layout
 
 ```
-air-classifier/
+air-classifier-service/
 ├── pyproject.toml                 # deps, ruff, mypy, pytest config
 ├── Dockerfile                     # multi-stage, non-root runtime
 ├── docker-compose.yml             # this service only; deps come from air-infra
@@ -22,7 +22,7 @@ air-classifier/
 ├── scripts/
 │   ├── fetch_model.py             # downloads a pinned, pre-built ONNX artifact
 │   └── export_zeroshot_model.py   # produces one from scratch (torch + optimum)
-└── src/air_classifier/
+└── src/air_classifier_service/
     ├── __init__.py                # __version__
     ├── main.py                    # create_app(), lifespan, middleware wiring
     ├── config.py                  # Settings (pydantic-settings), get_settings()
@@ -33,20 +33,23 @@ air-classifier/
     │   ├── errors.py              # AppError hierarchy + RFC 9457 handlers
     │   ├── middleware.py          # request-id, access log, timing, body-size cap
     │   └── v1/
-    │       ├── router.py          # request-scoped AnalysisService, error catalogue, aggregation
+    │       ├── router.py          # request-scoped AnalysisService/SummaryService, error catalogue
     │       ├── classify.py        # POST /v1/classify(/batch) — the whole surface
+    │       ├── summary.py         # POST /v1/summary/refresh — stateless customer-summary refresh
     │       └── system.py          # /v1/health, /v1/ready, /v1/capabilities, /metrics
     │
     ├── schemas/
     │   ├── common.py              # Label, Tier, Options, LabeledScore[T], Emotion, Aspect, ...
     │   ├── verdict.py             # TierVerdict, EscalationStep, LLMSentimentOutput
     │   ├── classify.py            # ClassifyRequest, ClassificationResponse (+ batch envelopes)
+    │   ├── summary.py             # SummaryItem, SummaryRollup, CustomerSummary, refresh envelopes
     │   └── responses.py           # HealthResponse, ReadyResponse — system endpoints only
     │
     ├── pipeline/
     │   ├── orchestrator.py        # Orchestrator.run(): the ladder
     │   ├── policy.py              # EscalationPolicy.decide()
-    │   ├── service.py             # HTTP↔ladder seam: preprocess, cache, shape, batch isolation
+    │   ├── service.py             # HTTP↔ladder seam: preprocess, cache, audit, shape, batch isolation
+    │   ├── summary_service.py     # SummaryService: rollup merge + guarded narrative-refresh call
     │   ├── features.py            # ComplexityFeatures extraction
     │   └── tiers/
     │       ├── base.py            # Tier protocol + TierContext
@@ -59,7 +62,8 @@ air-classifier/
     ├── providers/
     │   ├── base.py                # LLMProvider protocol, ProviderResult
     │   ├── air_llm_provider.py    # the one adapter: POST /v1/inference on air-llm
-    │   └── prompts/                # system.md, system_compact.md, loader.py
+    │   └── prompts/                # system.md, system_compact.md, system_summary.md, loader.py,
+    │                               # summary_loader.py
     │
     ├── preprocess/
     │   ├── normalize.py           # unicode NFKC, whitespace, control chars, length cap
@@ -72,6 +76,11 @@ air-classifier/
     │   ├── memory.py               # TTLCache, default
     │   ├── redis.py                # optional, config-selected
     │   └── factory.py
+    │
+    ├── audit/                     # optional operational log — not customer state (§7, §8)
+    │   ├── base.py                # AuditSink protocol, AuditEntry
+    │   ├── mongo.py                # MongoAuditSink: bounded queue, TTL index, fail-open
+    │   └── factory.py              # backend selection; "none" (default) is a true no-op
     │
     ├── resilience/
     │   ├── breaker.py             # CircuitBreaker
@@ -637,8 +646,14 @@ long-form discussion. Both share the same task framing and output schema in the 
 | `AIR_LLM__CLOUD_MODEL` | `classify-default` | Tier 3 — an air-llm routing alias with its own cross-vendor failover |
 | `AIR_LLM__ARBITER_MODEL` | `classify-arbiter` | Tier 3 arbitration trigger's target alias |
 | `AIR_LLM__ARBITRATION_FLOOR` | `0.65` | Confidence below which the arbiter alias is called |
-| `CACHE__BACKEND` | `memory` | `memory` \| `redis` |
+| `CACHE__BACKEND` | `memory` | `memory` \| `redis` \| `none` |
 | `CACHE__TTL_SECONDS` | `3600` | Verdict cache TTL |
+| `AUDIT__BACKEND` | `none` | `mongo` \| `none` — no zero-config fallback, unlike cache |
+| `AUDIT__MONGO_URL` | `mongodb://localhost:27017` | — |
+| `AUDIT__DATABASE` | `air_classifier_service` | — |
+| `AUDIT__TTL_DAYS` | `30` | Native Mongo TTL index; no cleanup job |
+| `AUDIT__QUEUE_MAX_SIZE` | `1000` | Bounded write queue; full queue drops the newest entry |
+| `AIR_LLM__SUMMARY_MODEL` | `summarize-default` | An air-llm alias for `/v1/summary/refresh`'s narrative step — its own alias, no failover chain (a failed refresh degrades, it does not escalate) |
 | `RESILIENCE__BREAKER_THRESHOLD` | `5` | Consecutive failures to open |
 | `RESILIENCE__BREAKER_COOLDOWN_S` | `30` | Half-open delay |
 | `RESILIENCE__LLM_CONCURRENCY` | `8` | Bulkhead width |
@@ -663,6 +678,7 @@ long-form discussion. Both share the same task framing and output schema in the 
 | `air_classifier_breaker_state` | gauge | `provider` (0 closed / 1 half-open / 2 open) |
 | `air_classifier_degraded_responses_total` | counter | `reason` |
 | `air_classifier_pii_redactions_total` | counter | `kind` |
+| `air_classifier_audit_events_total` | counter | `result` (`written`/`dropped_queue_full`/`failed`) |
 
 `decided_by_total` divided by `requests_total` **is** the tier-distribution KPI from the
 plan — the primary dashboard panel and the number that says whether the ladder is earning
@@ -711,7 +727,12 @@ Root span per request; child spans `preprocess`, `tier.{name}`, `provider.{name}
 | 503 | `no-verdict` | Every enabled tier failed |
 
 Note what is *absent*: there is no "provider unavailable" error surfaced to callers. A cloud
-outage produces a `200` with `degraded: true` and a lower-tier verdict.
+outage produces a `200` with `degraded: true` and a lower-tier verdict. The same holds for
+`/v1/summary/refresh`'s narrative step and for an audit-log write: neither has an error slug
+of its own, because neither can fail the request — a narrative-refresh failure comes back as
+`degraded: true` with the prior narrative unchanged, and an audit write failure is logged and
+counted (`air_classifier_audit_events_total{result="failed"}`) but never reaches the caller at
+all, by design (§7's audit config, §8's metric).
 
 ## 10. Testing strategy
 
@@ -747,6 +768,29 @@ deliberate: it pins the ladder's semantics while they are still cheap to change.
 
 Corrections to this document worth leaving a trace of, newest first. Each entry says what
 changed and why; the *current* behaviour is described in the sections above, not here.
+
+- **Service renamed `air-classifier` → `air-classifier-service`, 2026-09-05.** Aligns with
+  the AIR platform's naming convention ahead of the git repository itself being renamed. Full
+  rename: the Python package (`src/air_classifier/` → `src/air_classifier_service/`, every
+  import), the distribution name and CLI entry point, Docker/Compose names, and prose
+  throughout this repo's own docs. Two identifiers were deliberately left unchanged because
+  they are external contracts, not internal naming: the `AIR_CLASSIFIER__` env var prefix
+  (it doubles as this service's identity in air-llm's own access policy, in a different repo)
+  and the `air_classifier_*` Prometheus metric name prefix (an external monitoring contract —
+  dashboards/alerts elsewhere may query these names by string). A dev-only secret value
+  (`SECURITY__HASH_SALT`, and its paired `key_hash` in `.env.example`/`docker-compose.yml`)
+  and the OTel `OBS__SERVICE_NAME` default were renamed for consistency — both are this
+  service's own values with no cross-repo dependency.
+
+- **`/v1/summary/refresh` and the optional audit log added.** A stateless customer-summary
+  refresh endpoint (§1's `api/v1/summary.py`, `pipeline/summary_service.py`) and an optional
+  MongoDB-backed audit log of classification jobs (§1's `audit/` package) were added after
+  this document was first written — this revision is the first to reflect either in the repo
+  layout (§1), configuration table (§7), metrics catalogue (§8), and error model (§9). Neither
+  changes anything about the ladder itself: summary-refresh reuses `AnalysisService.analyse_batch`
+  for the per-item classification and only adds a rollup merge plus a separately-guarded
+  narrative-refresh call on top; the audit log is a fire-and-forget observer of `AnalysisService.analyse()`,
+  never in a position to affect a response.
 
 - **`/v1/capabilities` requires `X-API-Key` and is rate-limited, same as `/v1/classify`.**
   Flagged in peer review: it was the only `/v1` route besides `/v1/health`/`/v1/ready` with
