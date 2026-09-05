@@ -27,11 +27,13 @@ import re
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from pydantic import ValidationError
 
 from air_classifier import __version__
+from air_classifier.audit.base import AuditEntry, AuditSink
 from air_classifier.cache.base import CacheBackend, verdict_cache_key
 from air_classifier.config import Settings
 from air_classifier.constants import (
@@ -45,7 +47,7 @@ from air_classifier.constants import (
     Topic,
     Urgency,
 )
-from air_classifier.observability.logging import get_logger
+from air_classifier.observability.logging import current_api_key_id, get_logger
 from air_classifier.observability.metrics import (
     CacheEvent,
     record_cache_event,
@@ -345,10 +347,12 @@ class AnalysisService:
         orchestrator: Orchestrator,
         settings: Settings,
         cache: CacheBackend | None = None,
+        audit: AuditSink | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._settings = settings
         self._cache = cache
+        self._audit = audit
 
     # ── Single ────────────────────────────────────────────────────────────────
 
@@ -374,7 +378,7 @@ class AnalysisService:
         if prepared.cache_key is not None:
             hit = await self._cached(prepared.cache_key)
             if hit is not None:
-                return _shape(
+                response = _shape(
                     hit,
                     request_id=request_id,
                     prepared=prepared,
@@ -383,6 +387,8 @@ class AnalysisService:
                     latency_ms=(time.perf_counter() - started) * 1000.0,
                     cached=True,
                 )
+                await self._record_audit(request_id, prepared.text, response)
+                return response
 
         ctx = TierContext(
             request_id=request_id,
@@ -419,7 +425,7 @@ class AnalysisService:
         if prepared.cache_key is not None:
             await self._store(prepared.cache_key, result)
 
-        return _shape(
+        response = _shape(
             result,
             request_id=request_id,
             prepared=prepared,
@@ -428,6 +434,8 @@ class AnalysisService:
             latency_ms=(time.perf_counter() - started) * 1000.0,
             cached=False,
         )
+        await self._record_audit(request_id, prepared.text, response)
+        return response
 
     # ── Batch ─────────────────────────────────────────────────────────────────
 
@@ -560,6 +568,33 @@ class AnalysisService:
         if self._cache is None or result.degraded:
             return
         await self._cache.set(key, result.model_dump_json(), self._settings.cache.ttl_seconds)
+
+    async def _record_audit(
+        self, request_id: str, text: str, response: ClassificationResponse
+    ) -> None:
+        """Best-effort audit entry for one classification job.
+
+        `text` is `prepared.text` — already redacted, the same text every tier
+        saw. Wrapped in its own try/except as belt-and-suspenders on top of
+        `AuditSink`'s own never-raise contract: a defect in a sink implementation
+        must not turn a support log into a failed request.
+        """
+        if self._audit is None:
+            return
+        try:
+            await self._audit.record(
+                AuditEntry(
+                    request_id=request_id,
+                    text=text,
+                    api_key_id=current_api_key_id(),
+                    decided_by=response.decided_by,
+                    degraded=response.degraded,
+                    latency_ms=response.latency_ms,
+                    timestamp=datetime.now(UTC),
+                )
+            )
+        except Exception as exc:
+            _log.warning("audit.record_failed", request_id=request_id, error=type(exc).__name__)
         record_cache_event(CacheEvent.STORE)
 
     def _problem_for(

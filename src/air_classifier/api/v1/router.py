@@ -22,6 +22,7 @@ from air_classifier.api.errors import ValidationError
 from air_classifier.api.middleware import new_request_id
 from air_classifier.config import Settings
 from air_classifier.pipeline.service import AnalysisService
+from air_classifier.pipeline.summary_service import SummaryService
 from air_classifier.schemas.common import Options
 from air_classifier.schemas.errors import FieldError, ProblemDetail
 from air_classifier.security.api_keys import ApiKeyRecord
@@ -30,9 +31,11 @@ __all__ = [
     "ANALYSIS_ERROR_RESPONSES",
     "V1_PREFIX",
     "AnalysisServiceDep",
+    "SummaryServiceDep",
     "build_v1_router",
     "ensure_batch_size",
     "get_analysis_service",
+    "get_summary_service",
     "key_clamp",
     "replay_response",
     "request_id_of",
@@ -57,10 +60,28 @@ def get_analysis_service(state: AppStateDep) -> AnalysisService:
     orchestrator on ``AppState`` without something else having already captured
     the old one.
     """
-    return AnalysisService(state.orchestrator, state.settings, state.cache)
+    return AnalysisService(state.orchestrator, state.settings, state.cache, state.audit)
 
 
 AnalysisServiceDep = Annotated[AnalysisService, Depends(get_analysis_service)]
+
+
+def get_summary_service(state: AppStateDep) -> SummaryService:
+    """The customer-summary refresh service, built once at startup.
+
+    Unlike :func:`get_analysis_service` this is not rebuilt per request: it
+    owns its own bulkhead/breaker (`pipeline/summary_service.py`), which must
+    be shared across calls to mean anything. `main.py`'s lifespan always
+    constructs one — the narrative-refresh call inside it degrades on its own
+    when air-llm is not configured, so there is no "not configured" 503 here.
+    """
+    assert state.summary_service is not None, (
+        "AppState.summary_service is None; the application lifespan did not run"
+    )
+    return state.summary_service
+
+
+SummaryServiceDep = Annotated[SummaryService, Depends(get_summary_service)]
 
 
 def request_id_of(request: Request) -> str:
@@ -180,11 +201,12 @@ def build_v1_router() -> APIRouter:
     # helpers above, and a module-level import in this direction would close
     # the loop. Deferring it to construction time breaks the cycle without
     # either side having to care about import order.
-    from air_classifier.api.v1 import classify, system
+    from air_classifier.api.v1 import classify, summary, system
 
     v1 = APIRouter(prefix=V1_PREFIX)
     # System first so `/v1/health` keeps resolving even if the analysis router
     # ever grows a path that could shadow it.
     v1.include_router(system.router)
     v1.include_router(classify.router)
+    v1.include_router(summary.router)
     return v1

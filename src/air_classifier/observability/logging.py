@@ -29,6 +29,7 @@ __all__ = [
     "bind_request_context",
     "clear_request_context",
     "configure_logging",
+    "current_api_key_id",
     "get_logger",
     "safe_text_fields",
 ]
@@ -173,6 +174,17 @@ def clear_request_context() -> None:
     request's identifiers into the next one's logs.
     """
     structlog.contextvars.clear_contextvars()
+
+
+def current_api_key_id() -> str | None:
+    """The caller's key id, if `api/deps.py::require_api_key` has bound one.
+
+    Best-effort read of the same contextvar every log line already carries —
+    for a consumer (the audit log) that wants the identifier without importing
+    structlog directly or threading it through a call signature.
+    """
+    value = structlog.contextvars.get_contextvars().get("api_key_id")
+    return value if isinstance(value, str) else None
 
 
 def safe_text_fields(text: str, settings: Settings) -> dict[str, object]:

@@ -98,6 +98,31 @@ def test_overriding_one_air_llm_key_preserves_the_others(
     assert air_llm.timeout_s == 45.0
     assert air_llm.cloud_model == "classify-default"
     assert air_llm.max_tokens == 2048
+    assert air_llm.summary_model == "summarize-default"
+    assert air_llm.summary_max_tokens == 512
+
+
+def test_overriding_the_summary_model_preserves_its_siblings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AIR_CLASSIFIER__AIR_LLM__SUMMARY_MODEL", "summarize-custom")
+    air_llm = Settings().air_llm
+    assert air_llm.summary_model == "summarize-custom"
+    assert air_llm.summary_max_tokens == 512
+    assert air_llm.summary_timeout_s == 10.0
+    assert air_llm.cloud_model == "classify-default"
+
+
+def test_overriding_one_audit_key_preserves_the_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit has no zero-config fallback like cache does — "none" ships by default."""
+    monkeypatch.setenv("AIR_CLASSIFIER__AUDIT__TTL_DAYS", "7")
+    audit = Settings().audit
+    assert audit.backend == "none"
+    assert audit.ttl_days == 7
+    assert audit.database == "air_classifier"
+    assert audit.queue_max_size == 1000
 
 
 def test_a_bare_tier_settings_merges_rather_than_resets() -> None:

@@ -46,6 +46,8 @@ from air_classifier.api.v1.system import (
     STATE_TIERS,
     build_metrics_router,
 )
+from air_classifier.audit.base import AuditSink
+from air_classifier.audit.factory import build_audit_sink
 from air_classifier.cache.base import CacheBackend
 from air_classifier.cache.factory import build_cache
 from air_classifier.config import Settings, get_settings
@@ -56,6 +58,7 @@ from air_classifier.observability.tracing import configure_tracing, instrument_a
 from air_classifier.pipeline.orchestrator import Orchestrator
 from air_classifier.pipeline.policy import EscalationPolicy
 from air_classifier.pipeline.service import AnalysisService
+from air_classifier.pipeline.summary_service import SummaryService
 from air_classifier.pipeline.tiers.base import Tier as TierProtocol
 from air_classifier.pipeline.tiers.t0_rules import RulesTier
 from air_classifier.pipeline.tiers.t1_classifier import ClassifierTier
@@ -146,22 +149,29 @@ class Ladder:
 
     ``providers`` is kept separately from the tiers that use them because
     shutdown closes providers, and a provider that was built but whose tier was
-    skipped still owns a connection pool.
+    skipped still owns a connection pool. ``summary_provider`` is not a ladder
+    rung at all — it backs the customer-summary narrative refresh
+    (`pipeline/summary_service.py`) — but it is built the same non-fatal way
+    and is already included in ``providers`` for shutdown.
     """
 
     tiers: tuple[TierProtocol, ...] = ()
     providers: tuple[LLMProvider, ...] = field(default_factory=tuple)
+    summary_provider: LLMProvider | None = None
 
 
 @contextmanager
-def _tier_guard(tier: TierId) -> Iterator[None]:
-    """Let one rung fail to build without taking the service down.
+def _tier_guard(component: str) -> Iterator[None]:
+    """Let one optional component fail to build without taking the service down.
 
     This is the single most important behaviour in this module. Without it, a
     revoked air-llm token or air-llm itself being unreachable would turn a
     service designed to degrade into one that cannot start — and a crash loop
     at boot is strictly worse than a shorter ladder, because a shorter ladder
-    still answers.
+    still answers. Named generically rather than after :class:`TierId` because
+    it also guards the customer-summary narrative provider, which is not a
+    ladder rung — callers pass `.value` for an actual tier and a plain string
+    for anything else.
 
     The exception's message is logged but never reaches a caller: it can carry a
     file path or a base URL, and ``/v1/capabilities`` already reports the
@@ -170,11 +180,11 @@ def _tier_guard(tier: TierId) -> Iterator[None]:
     try:
         yield
     except _TierUnconfiguredError as exc:
-        _log.warning("startup.tier_skipped", tier=tier.value, reason=str(exc))
+        _log.warning("startup.component_skipped", component=component, reason=str(exc))
     except Exception as exc:
         _log.warning(
-            "startup.tier_build_failed",
-            tier=tier.value,
+            "startup.component_build_failed",
+            component=component,
             error=type(exc).__name__,
             detail=str(exc),
         )
@@ -190,13 +200,14 @@ def build_ladder(settings: Settings) -> Ladder:
     enabled = set(settings.enabled_tiers())
     tiers: list[TierProtocol] = []
     providers: list[LLMProvider] = []
+    summary_provider: LLMProvider | None = None
 
     if TierId.T0_RULES in enabled:
-        with _tier_guard(TierId.T0_RULES):
+        with _tier_guard(TierId.T0_RULES.value):
             tiers.append(RulesTier(settings))
 
     if TierId.T1_CLASSIFIER in enabled:
-        with _tier_guard(TierId.T1_CLASSIFIER):
+        with _tier_guard(TierId.T1_CLASSIFIER.value):
             # `build_scorer` already falls back to the lexicon when the ONNX
             # artifact is missing, so this rung effectively cannot be skipped —
             # which is why a deployment with nothing else configured still has a
@@ -204,7 +215,7 @@ def build_ladder(settings: Settings) -> Ladder:
             tiers.append(ClassifierTier(settings))
 
     if TierId.T2_LOCAL_LLM in enabled:
-        with _tier_guard(TierId.T2_LOCAL_LLM):
+        with _tier_guard(TierId.T2_LOCAL_LLM.value):
             local = AirLlmProvider(settings, Provider.OLLAMA)
             # Constructing the provider does no I/O, so `configured` here means
             # "switched on", not "reachable". Reachability is a readiness
@@ -216,7 +227,7 @@ def build_ladder(settings: Settings) -> Ladder:
             tiers.append(LocalLLMTier(settings, local))
 
     if TierId.T3_CLOUD_LLM in enabled:
-        with _tier_guard(TierId.T3_CLOUD_LLM):
+        with _tier_guard(TierId.T3_CLOUD_LLM.value):
             cloud = AirLlmProvider(settings, Provider.ANTHROPIC)
             # Appended before the credential check so that shutdown still closes
             # a provider whose HTTP client was built but whose tier was skipped.
@@ -224,6 +235,17 @@ def build_ladder(settings: Settings) -> Ladder:
             if not cloud.configured:
                 raise _TierUnconfiguredError("air_llm is disabled in configuration")
             tiers.append(CloudLLMTier(settings, cloud))
+
+    # Not a ladder rung — the customer-summary narrative refresh
+    # (pipeline/summary_service.py) — but built the same non-fatal way and its
+    # own instance rather than reusing T3's, so its bulkhead/breaker are keyed
+    # independently (see SummaryService) rather than sharing T3's fault state.
+    with _tier_guard("summary_refresh"):
+        summary = AirLlmProvider(settings, Provider.ANTHROPIC)
+        providers.append(summary)
+        if not summary.configured:
+            raise _TierUnconfiguredError("air_llm is disabled in configuration")
+        summary_provider = summary
 
     _log.info(
         "startup.ladder_built",
@@ -239,7 +261,7 @@ def build_ladder(settings: Settings) -> Ladder:
         # re-checked signal for that, not this line.
         configured=[p.name.value for p in providers if p.configured],
     )
-    return Ladder(tiers=tuple(tiers), providers=tuple(providers))
+    return Ladder(tiers=tuple(tiers), providers=tuple(providers), summary_provider=summary_provider)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -271,20 +293,29 @@ def _lifespan(settings: Settings) -> Callable[[FastAPI], AbstractAsyncContextMan
         _log.info("startup.begin", env=settings.app.env, version=__version__)
 
         cache = await build_cache(settings)
+        audit = build_audit_sink(settings)
+        await audit.start()
         api_keys = ApiKeyStore.load(settings)
         # The limiter's buckets live in the cache, so it cannot precede it.
         rate_limiter = RateLimiter(cache, settings)
 
         ladder = build_ladder(settings)
         orchestrator = Orchestrator(ladder.tiers, EscalationPolicy(settings), settings)
+        analysis_service = AnalysisService(orchestrator, settings, cache, audit)
+        # Always constructed, even when the narrative provider is not — only
+        # the narrative-refresh call inside it degrades. See
+        # pipeline/summary_service.py.
+        summary_service = SummaryService(analysis_service, ladder.summary_provider, settings)
 
         AppState(
             settings=settings,
             cache=cache,
+            audit=audit,
             api_keys=api_keys,
             rate_limiter=rate_limiter,
             orchestrator=orchestrator,
             tiers=ladder.tiers,
+            summary_service=summary_service,
         ).attach(app)
 
         # `api/v1/system.py` reads these three off `app.state` by name rather
@@ -294,12 +325,14 @@ def _lifespan(settings: Settings) -> Callable[[FastAPI], AbstractAsyncContextMan
         setattr(app.state, STATE_SETTINGS, settings)
         setattr(app.state, STATE_TIERS, ladder.tiers)
         setattr(app.state, STATE_CACHE, cache)
-        setattr(app.state, STATE_ANALYSIS_SERVICE, AnalysisService(orchestrator, settings, cache))
+        setattr(app.state, STATE_ANALYSIS_SERVICE, analysis_service)
 
         _log.info(
             "startup.complete",
             tiers=[tier.tier.value for tier in ladder.tiers],
             cache_backend=settings.cache.backend,
+            audit_backend=settings.audit.backend,
+            summary_refresh_configured=ladder.summary_provider is not None,
             api_keys=len(api_keys),
             allow_unauthenticated=settings.security.allow_unauthenticated,
             docs_enabled=settings.app.docs_enabled,
@@ -307,13 +340,17 @@ def _lifespan(settings: Settings) -> Callable[[FastAPI], AbstractAsyncContextMan
         try:
             yield
         finally:
-            await _shutdown(settings, cache=cache, providers=ladder.providers)
+            await _shutdown(settings, cache=cache, audit=audit, providers=ladder.providers)
 
     return lifespan
 
 
 async def _shutdown(
-    settings: Settings, *, cache: CacheBackend, providers: Sequence[LLMProvider]
+    settings: Settings,
+    *,
+    cache: CacheBackend,
+    audit: AuditSink,
+    providers: Sequence[LLMProvider],
 ) -> None:
     """Release every connection pool, bounded by the grace period.
 
@@ -330,14 +367,16 @@ async def _shutdown(
         # closing pools is not the same as draining traffic, and leaking sockets
         # on the way out is never what an operator meant by "do not wait".
         async with asyncio.timeout(grace if grace > 0 else None):
-            await _close_all(cache=cache, providers=providers)
+            await _close_all(cache=cache, audit=audit, providers=providers)
     except TimeoutError:
         _log.warning("shutdown.grace_exceeded", grace_seconds=grace)
     _log.info("shutdown.complete")
 
 
-async def _close_all(*, cache: CacheBackend, providers: Sequence[LLMProvider]) -> None:
-    """Close the providers concurrently, then the cache.
+async def _close_all(
+    *, cache: CacheBackend, audit: AuditSink, providers: Sequence[LLMProvider]
+) -> None:
+    """Close the providers concurrently, then the cache and the audit sink.
 
     ``return_exceptions`` so one backend that fails to close does not leave the
     others open — at this point in the process's life there is nothing left to
@@ -358,6 +397,11 @@ async def _close_all(*, cache: CacheBackend, providers: Sequence[LLMProvider]) -
         await cache.aclose()
     except Exception as exc:
         _log.warning("shutdown.cache_close_failed", error=type(exc).__name__)
+
+    try:
+        await audit.aclose()
+    except Exception as exc:
+        _log.warning("shutdown.audit_close_failed", error=type(exc).__name__)
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────

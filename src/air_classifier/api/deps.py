@@ -34,11 +34,13 @@ from air_classifier.api.errors import (
     RateLimitedError,
 )
 from air_classifier.api.middleware import API_KEY_ID_ATTR
+from air_classifier.audit.base import AuditSink
 from air_classifier.cache.base import CacheBackend, idempotency_cache_key
 from air_classifier.config import Settings
 from air_classifier.constants import HEADER_API_KEY, HEADER_IDEMPOTENCY_KEY
 from air_classifier.observability.logging import bind_request_context, get_logger
 from air_classifier.pipeline.orchestrator import Orchestrator
+from air_classifier.pipeline.summary_service import SummaryService
 from air_classifier.pipeline.tiers.base import Tier
 from air_classifier.schemas.common import Options
 from air_classifier.security.api_keys import ApiKeyRecord, ApiKeyStore
@@ -99,6 +101,16 @@ class AppState:
     #: ``/v1/capabilities`` need the tiers themselves, not just the orchestrator
     #: they were handed to.
     tiers: tuple[Tier, ...] = field(default_factory=tuple)
+    #: `None` when audit logging is switched off (`AuditSettings.backend ==
+    #: "none"`) — symmetric with `AnalysisService`'s own optional `audit`
+    #: parameter, so this module never needs to import `audit/factory.py`.
+    audit: AuditSink | None = None
+    #: `main.py`'s lifespan always constructs a real one — the narrative-refresh
+    #: call inside it degrades on its own when air-llm is not configured, so the
+    #: service itself never needs to be absent. `None` is only the default for a
+    #: minimal `AppState` built by hand (tests, `api/v1/system.py`'s bare test
+    #: app), matching `tiers`'s own empty-tuple default above.
+    summary_service: SummaryService | None = None
 
     def attach(self, app: FastAPI) -> None:
         """Publish this state on ``app.state`` for :func:`get_app_state`."""

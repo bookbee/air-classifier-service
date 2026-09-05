@@ -335,6 +335,118 @@
           }
         }
       }
+    },
+    "/v1/summary/refresh": {
+      "post": {
+        "tags": [
+          "summary"
+        ],
+        "summary": "Fold new feedback/reviews into a customer's rolling summary",
+        "description": "Stateless: classifies every new item, deterministically merges the rollup onto `existing_summary` (or starts one, when omitted), and refreshes the narrative through an LLM call. This service stores nothing \u2014 persist the returned `summary` and send it back as `existing_summary` next time. A narrative-refresh failure returns `degraded: true` with the prior narrative unchanged; the rollup and per-item verdicts are unaffected.",
+        "operationId": "refresh_summary_v1_summary_refresh_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SummaryRefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SummaryRefreshResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unparseable body, or a payload above the configured size cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `X-API-Key` header was supplied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key is unknown, lacks the scope, or forbids the requested options.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`Idempotency-Key` was reused with a different request body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Schema validation failed, or the batch exceeded `max_batch_items`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Quota exhausted for this key. Carries `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unhandled defect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Every enabled tier failed to produce a usable verdict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -814,6 +926,30 @@
         ],
         "title": "ClassifyRequest",
         "description": "One piece of text, plus every optional field any prior resource used.\n\nOnly `text` is required. The rest are hints: fill in `rating` for\nsomething that came from a review, `channel` for something that came from\na support form, or nothing at all for plain text with no known origin \u2014\neach is read only where it is relevant (`rating` by the T0 rating\nshortcut and `rating_consistency`; `channel` by the urgency heuristic) and\nignored everywhere else."
+      },
+      "CustomerSummary": {
+        "properties": {
+          "narrative": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Narrative",
+            "description": "2-4 sentence synthesis. Empty before any refresh.",
+            "default": ""
+          },
+          "rollup": {
+            "$ref": "#/components/schemas/SummaryRollup"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "description": "Bumped when this shape's *meaning* changes (a rollup field is redefined, a histogram's vocabulary shifts). A caller-stored summary at an older version should be rebuilt from scratch rather than merged into.",
+            "default": 1
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "CustomerSummary",
+        "description": "The full rolling state a caller stores and resends on the next refresh.\n\nRound-trips byte-for-byte: store exactly what this service returns, and\nsend it back exactly as `existing_summary` next time \u2014 this service never\nreads or writes it anywhere else."
       },
       "Emotion": {
         "properties": {
@@ -1494,6 +1630,337 @@
         ],
         "title": "SentimentResult",
         "description": "The core judgement every tier produces."
+      },
+      "SummaryItem": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "description": "The text to analyse."
+          },
+          "source_type": {
+            "type": "string",
+            "enum": [
+              "feedback",
+              "review"
+            ],
+            "title": "Source Type",
+            "description": "Where this text came from \u2014 governs `rollup.counts_by_source_type` only."
+          },
+          "channel": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Channel",
+            "description": "app | email | support | survey | ..."
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "rating": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rating",
+            "description": "Stars as given by the author."
+          },
+          "rating_scale_max": {
+            "type": "number",
+            "maximum": 100.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Rating Scale Max",
+            "default": 5.0
+          },
+          "product_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Id"
+          },
+          "occurred_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At",
+            "description": "When this was authored. Governs rollup ordering; omit to sort last."
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text",
+          "source_type"
+        ],
+        "title": "SummaryItem",
+        "description": "One new feedback or review text to fold into a customer's summary.\n\nShares its optional fields with :class:`~air_classifier.schemas.classify.ClassifyRequest`\nbut is its own model, not a subclass: `ClassifyRequest` is `extra=\"forbid\"`\nand already a large, stable contract, and `source_type`/`occurred_at` are\nconcepts specific to this endpoint, not to single-text classification."
+      },
+      "SummaryRefreshRequest": {
+        "properties": {
+          "customer_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Customer Id",
+            "description": "Opaque identifier, echoed back only. Never looked up or stored."
+          },
+          "existing_summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CustomerSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omit for a customer's first-ever summary."
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SummaryItem"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Items"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Options"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Applied to every item; see /v1/classify/batch's own field."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "customer_id",
+          "items"
+        ],
+        "title": "SummaryRefreshRequest",
+        "description": "A batch of new items to fold onto a customer's summary, stateless.\n\nThis service persists nothing about `customer_id` or the resulting\n`summary` \u2014 the caller owns storage and resends `existing_summary` on the\nnext call."
+      },
+      "SummaryRefreshResponse": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "customer_id": {
+            "type": "string",
+            "title": "Customer Id",
+            "description": "Echoed back from the request, unmodified."
+          },
+          "summary": {
+            "$ref": "#/components/schemas/CustomerSummary",
+            "description": "Store this; resend it as existing_summary on the next refresh."
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ClassifyBatchItem"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "One entry per request item, in order \u2014 same shape as /classify/batch's."
+          },
+          "degraded": {
+            "type": "boolean",
+            "title": "Degraded",
+            "description": "True if the narrative refresh failed; rollup and items are still current.",
+            "default": false
+          },
+          "usage": {
+            "$ref": "#/components/schemas/RequestUsage",
+            "description": "Summed across items classified successfully."
+          },
+          "latency_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Latency Ms",
+            "default": 0.0
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "customer_id",
+          "summary",
+          "items"
+        ],
+        "title": "SummaryRefreshResponse",
+        "description": "The updated state to store, plus the individual verdict for every item sent.\n\nPersist `summary` in place of whatever `existing_summary` was on this call,\nand send it back as `existing_summary` on the next refresh for this\ncustomer."
+      },
+      "SummaryRollup": {
+        "properties": {
+          "total_items": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Items",
+            "description": "Every item folded in so far.",
+            "default": 0
+          },
+          "counts_by_source_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Counts By Source Type",
+            "description": "e.g. {\"feedback\": 3, \"review\": 1}."
+          },
+          "sentiment_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/Label"
+            },
+            "type": "object",
+            "title": "Sentiment Counts",
+            "description": "Full histogram \u2014 every Label seen, none truncated."
+          },
+          "urgency_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/Urgency"
+            },
+            "type": "object",
+            "title": "Urgency Counts",
+            "description": "Full histogram \u2014 every Urgency seen, none truncated."
+          },
+          "topic_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/Topic"
+            },
+            "type": "object",
+            "title": "Topic Counts",
+            "description": "Full histogram \u2014 every Topic seen, none truncated."
+          },
+          "rating_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Rating Count",
+            "description": "Items that carried a rating.",
+            "default": 0
+          },
+          "rating_sum": {
+            "type": "number",
+            "title": "Rating Sum",
+            "description": "Sum of every rating seen, lifetime.",
+            "default": 0.0
+          },
+          "average_rating": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Average Rating",
+            "description": "rating_sum / rating_count, on the scale each item supplied."
+          },
+          "recent_ratings": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "maxItems": 5,
+            "title": "Recent Ratings",
+            "description": "The last (up to) 5 ratings, oldest first \u2014 kept as actual values, not an average, because a stateless refresh cannot reconstruct one from the other."
+          },
+          "recent_average_rating": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recent Average Rating",
+            "description": "Mean of recent_ratings."
+          },
+          "first_seen_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Seen At",
+            "description": "`occurred_at` of the earliest item folded in, across all calls."
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At",
+            "description": "`occurred_at` of the most recent item folded in."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "SummaryRollup",
+        "description": "Deterministic, cheap-to-recompute aggregate over every item folded in so far.\n\nEvery histogram is kept in full rather than truncated to a \"top N\": each of\n`Label`, `Urgency` and `Topic` is a small closed vocabulary, so the full map\ncosts nothing and a truncated one would silently lose history whenever a\nvalue fell out of the window and later reappeared."
       },
       "Tier": {
         "type": "string",

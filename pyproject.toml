@@ -26,6 +26,7 @@ dependencies = [
 # No per-vendor LLM SDKs here: every model call goes through air-llm's HTTP
 # API (providers/air_llm_provider.py), not a vendor client library.
 redis = ["redis>=5.2"]
+mongo = ["motor>=3.5"]
 onnx = ["onnxruntime>=1.20", "tokenizers>=0.20", "numpy>=1.26"]
 otel = [
     "opentelemetry-api>=1.28",
@@ -35,7 +36,7 @@ otel = [
 ]
 # Everything a production image needs.
 all = [
-    "air-classifier[redis,onnx,otel]",
+    "air-classifier[redis,mongo,onnx,otel]",
 ]
 dev = [
     "pytest>=8.3",
@@ -99,7 +100,7 @@ packages = ["air_classifier"]
 # The `otel` extra is optional, so these must type-check whether or not it is
 # installed. `ignore_missing_imports` covers the absent case without inline
 # ignores, which would themselves be flagged as unused once it IS installed.
-module = ["onnxruntime.*", "tokenizers.*", "prometheus_client.*", "opentelemetry.*"]
+module = ["onnxruntime.*", "tokenizers.*", "prometheus_client.*", "opentelemetry.*", "motor.*"]
 ignore_missing_imports = true
 
 # ── pytest ────────────────────────────────────────────────────────────────────

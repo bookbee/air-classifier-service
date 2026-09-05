@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import pytest
 
+from air_classifier.audit.base import AuditEntry, AuditSink
 from air_classifier.cache.memory import MemoryCache
 from air_classifier.config import AppSettings, ClassifierSettings, Settings
 from air_classifier.constants import (
@@ -144,8 +145,9 @@ def build_service(
     orchestrator: StubOrchestrator,
     settings: Settings,
     cache: MemoryCache | None = None,
+    audit: AuditSink | None = None,
 ) -> AnalysisService:
-    return AnalysisService(cast("Orchestrator", orchestrator), settings, cache)
+    return AnalysisService(cast("Orchestrator", orchestrator), settings, cache, audit)
 
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
@@ -820,3 +822,91 @@ async def test_no_verdict_propagates_from_a_single_call(settings: Settings) -> N
         await service.analyse(
             ClassifyRequest(text="anything at all"), request_id="req_1", options=Options()
         )
+
+
+# ── Audit ─────────────────────────────────────────────────────────────────────
+
+
+class FakeAuditSink:
+    """Captures every entry recorded, for assertion."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.entries: list[AuditEntry] = []
+        self._fail = fail
+
+    async def start(self) -> None:
+        return None
+
+    async def record(self, entry: AuditEntry) -> None:
+        if self._fail:
+            raise RuntimeError("sink is down")
+        self.entries.append(entry)
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_audit_records_the_redacted_text_and_verdict(settings: Settings) -> None:
+    stub = StubOrchestrator(make_result(verdicts=[make_verdict(tier=Tier.T1_CLASSIFIER)]))
+    audit = FakeAuditSink()
+    service = build_service(stub, settings, audit=audit)
+
+    response = await service.analyse(
+        ClassifyRequest(text="Mail me at alice@example.com about the refund"),
+        request_id="req_1",
+        options=Options(),
+    )
+
+    assert len(audit.entries) == 1
+    entry = audit.entries[0]
+    assert entry.request_id == "req_1"
+    assert "alice@example.com" not in entry.text
+    assert entry.decided_by == response.decided_by
+    assert entry.degraded == response.degraded
+    assert entry.latency_ms == response.latency_ms
+
+
+async def test_no_audit_sink_is_a_supported_shape(settings: Settings) -> None:
+    stub = StubOrchestrator()
+    service = build_service(stub, settings)
+
+    await service.analyse(
+        ClassifyRequest(text="fine either way"), request_id="req_1", options=Options()
+    )
+
+
+async def test_a_failing_audit_sink_does_not_fail_the_request(settings: Settings) -> None:
+    stub = StubOrchestrator()
+    service = build_service(stub, settings, audit=FakeAuditSink(fail=True))
+
+    response = await service.analyse(
+        ClassifyRequest(text="still answers"), request_id="req_1", options=Options()
+    )
+
+    assert response.sentiment is not None
+
+
+async def test_audit_records_a_cache_hit_too(settings: Settings, memory_cache: MemoryCache) -> None:
+    stub = StubOrchestrator()
+    audit = FakeAuditSink()
+    service = build_service(stub, settings, cache=memory_cache, audit=audit)
+    request = ClassifyRequest(text="Great product, thanks!")
+
+    await service.analyse(request, request_id="req_1", options=Options())
+    await service.analyse(request, request_id="req_2", options=Options())
+
+    assert stub.calls == 1  # the second call was a cache hit
+    assert len(audit.entries) == 2  # both were still audited
+
+
+async def test_batch_audits_each_item(settings: Settings) -> None:
+    stub = StubOrchestrator()
+    audit = FakeAuditSink()
+    service = build_service(stub, settings, audit=audit)
+
+    await service.analyse_batch(
+        [ClassifyRequest(text="one"), ClassifyRequest(text="two")],
+        request_id="req_1",
+    )
+
+    assert len(audit.entries) == 2

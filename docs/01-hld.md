@@ -100,6 +100,7 @@ All endpoints are versioned under `/v1` and respond with `application/json` (err
 | --- | --- | --- | --- |
 | `POST` | `/v1/classify` | Required | The single entry point: sentiment, tone, topics, intent, urgency, routing, requires-human, actionability, and (when the caller supplied a rating or wants aspects) rating consistency and per-aspect sentiment |
 | `POST` | `/v1/classify/batch` | Required | Batch variant, up to `app.max_batch_items` |
+| `POST` | `/v1/summary/refresh` | Required | Stateless customer-summary refresh: classifies new feedback/review items, merges them onto a caller-supplied `existing_summary`, and returns the updated rollup and narrative. This service stores nothing — the caller persists the result |
 | `GET`  | `/v1/health` | None | Liveness — process is up |
 | `GET`  | `/v1/ready` | None | Readiness — every enabled tier probed |
 | `GET`  | `/v1/capabilities` | Required | Tier inventory, model versions, supported languages, limits — deployment detail for an operator, not a liveness boolean |

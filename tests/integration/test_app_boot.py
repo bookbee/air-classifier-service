@@ -52,6 +52,7 @@ from air_classifier.main import STATE_ANALYSIS_SERVICE, create_app
 from air_classifier.pipeline.service import AnalysisService
 from air_classifier.pipeline.tiers.scorers import LEXICON_SCORER_NAME
 from air_classifier.schemas.classify import ClassificationResponse
+from air_classifier.schemas.summary import SummaryRefreshResponse
 from air_classifier.security.api_keys import ALL_SCOPES, hash_key
 
 #: Presented as ``X-API-Key``. Real auth rather than
@@ -205,6 +206,33 @@ def test_shutdown_releases_the_cache(app: FastAPI) -> None:
         assert cache.size > 0
 
     assert cache.size == 0
+
+
+def test_boots_with_audit_backend_mongo_unreachable() -> None:
+    """The optional-dependency contract audit shares with cache and air-llm."""
+    settings = build_settings()
+    settings.audit.backend = "mongo"
+    settings.audit.mongo_url = "mongodb://127.0.0.1:1/"
+
+    with TestClient(create_app(settings)) as started:
+        response = started.post("/v1/classify", json={"text": _CLEARLY_POSITIVE}, headers=AUTH)
+
+    assert response.status_code == 200
+
+
+def test_shutdown_closes_the_audit_sink() -> None:
+    """Shutdown reaches the audit sink even when it never connected.
+
+    Closure itself (never raising, draining what is queued) is pinned at the
+    unit level (`tests/unit/test_audit_mongo.py`) — this only confirms
+    `main.py`'s lifespan actually calls it, by way of the `with` block above
+    completing without raising.
+    """
+    settings = build_settings()
+    settings.audit.backend = "mongo"
+    settings.audit.mongo_url = "mongodb://127.0.0.1:1/"
+    with TestClient(create_app(settings)) as started:
+        started.post("/v1/classify", json={"text": _CLEARLY_POSITIVE}, headers=AUTH)
 
 
 # ── Operational endpoints ─────────────────────────────────────────────────────
@@ -429,6 +457,64 @@ def test_an_unauthenticated_request_is_a_problem_document(client: TestClient) ->
     assert body["type"].endswith("/missing-api-key")
     assert body["instance"] == "/v1/classify"
     assert body["request_id"] == response.headers[HEADER_REQUEST_ID]
+
+
+def test_summary_service_is_always_built(app: FastAPI) -> None:
+    """Unlike a ladder rung, this is never absent — only its narrative call degrades."""
+    with TestClient(app):
+        assert app_state_of(app).summary_service is not None
+
+
+def test_summary_refresh_degrades_without_air_llm(client: TestClient) -> None:
+    """This deployment has no air-llm: the rollup still works, the narrative degrades."""
+    response = client.post(
+        "/v1/summary/refresh",
+        json={
+            "customer_id": "cust_1",
+            "items": [{"text": _CLEARLY_POSITIVE, "source_type": "feedback"}],
+        },
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    body = SummaryRefreshResponse.model_validate(response.json())
+    assert body.customer_id == "cust_1"
+    assert body.degraded is True
+    assert body.summary.rollup.total_items == 1
+    assert body.summary.narrative == ""
+
+
+def test_summary_refresh_accumulates_across_calls(client: TestClient) -> None:
+    """The caller resends `existing_summary`; the rollup keeps counting from it."""
+    first = client.post(
+        "/v1/summary/refresh",
+        json={
+            "customer_id": "cust_1",
+            "items": [{"text": _CLEARLY_POSITIVE, "source_type": "feedback", "rating": 5}],
+        },
+        headers=AUTH,
+    ).json()
+
+    second = client.post(
+        "/v1/summary/refresh",
+        json={
+            "customer_id": "cust_1",
+            "existing_summary": first["summary"],
+            "items": [{"text": "not acceptable", "source_type": "review", "rating": 1}],
+        },
+        headers=AUTH,
+    ).json()
+
+    assert second["summary"]["rollup"]["total_items"] == 2
+    assert second["summary"]["rollup"]["recent_ratings"] == [5.0, 1.0]
+
+
+def test_summary_refresh_requires_authentication(client: TestClient) -> None:
+    response = client.post(
+        "/v1/summary/refresh",
+        json={"customer_id": "cust_1", "items": [{"text": "x", "source_type": "feedback"}]},
+    )
+    assert response.status_code == 401
 
 
 def test_an_oversized_body_is_refused_by_the_middleware() -> None:

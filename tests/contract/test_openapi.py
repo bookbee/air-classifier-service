@@ -11,7 +11,7 @@ Three properties are pinned:
   model FastAPI cannot resolve raises at generation time rather than at import
   time. Nothing else in the suite would notice, because no other test asks for
   the document.
-* **The surface is exactly docs/01-hld.md §4.** Nine paths under ``/v1``, with
+* **The surface is exactly docs/01-hld.md §4.** Six paths under ``/v1``, with
   the methods that table gives them. Asserted as an equality rather than a
   series of ``in`` checks, so an accidentally exported route fails here too.
 * **Failure is described, not only success.** A generated client that knows the
@@ -51,15 +51,18 @@ SPEC_PATH: Final[Path] = Path(__file__).resolve().parents[2] / "docs" / "openapi
 EXPECTED_PATHS: Final[dict[str, set[str]]] = {
     "/v1/classify": {"post"},
     "/v1/classify/batch": {"post"},
+    "/v1/summary/refresh": {"post"},
     "/v1/health": {"get"},
     "/v1/ready": {"get"},
     "/v1/capabilities": {"get"},
 }
 
-#: The two that run the ladder, and therefore carry the full error catalogue.
+#: The three that run the ladder (directly or via the summary service), and
+#: therefore carry the full error catalogue.
 ANALYSIS_PATHS: Final[tuple[str, ...]] = (
     "/v1/classify",
     "/v1/classify/batch",
+    "/v1/summary/refresh",
 )
 
 #: docs/02-lld.md §9. Every one of these is reachable on an analysis route, so

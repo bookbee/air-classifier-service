@@ -50,6 +50,14 @@ class CacheEvent(StrEnum):
     STORE = "store"
 
 
+class AuditEvent(StrEnum):
+    """Outcomes of one audit-log write attempt."""
+
+    WRITTEN = "written"
+    DROPPED_QUEUE_FULL = "dropped_queue_full"
+    FAILED = "failed"
+
+
 class TokenKind(StrEnum):
     """Token classes billed at different rates."""
 
@@ -214,6 +222,13 @@ PII_REDACTIONS_TOTAL: Final = Counter(
     registry=_REGISTRY,
 )
 
+AUDIT_EVENTS_TOTAL: Final = Counter(
+    "air_classifier_audit_events_total",
+    "Audit log writes, drops, and failures.",
+    ("result",),
+    registry=_REGISTRY,
+)
+
 
 def get_registry() -> CollectorRegistry:
     """The registry every metric in this service is registered against."""
@@ -320,6 +335,11 @@ def record_pii_redaction(kind: PIIKind, count: int = 1) -> None:
     """Redacted spans of one kind. Counts spans, not requests."""
     if count > 0:
         PII_REDACTIONS_TOTAL.labels(kind=kind.value).inc(count)
+
+
+def record_audit_event(result: AuditEvent) -> None:
+    """One audit-log write attempt, whichever way it went."""
+    AUDIT_EVENTS_TOTAL.labels(result=result.value).inc()
 
 
 @contextmanager

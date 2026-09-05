@@ -217,6 +217,14 @@ class AirLlmSettings(BaseModel):
     max_tokens: int = Field(default=2048, ge=64, le=8192)
     arbiter_max_tokens: int = Field(default=4096, ge=64, le=16384)
 
+    # Customer-summary narrative refresh (pipeline/summary_service.py) — a
+    # single-entry alias like `local_model`: no cross-vendor failover, because
+    # a narrative refresh failing outright degrades to the caller's prior
+    # narrative unchanged, so there is no ladder above it to protect.
+    summary_model: str = "summarize-default"
+    summary_max_tokens: int = Field(default=512, ge=64, le=4096)
+    summary_timeout_s: float = Field(default=10.0, gt=0)
+
     @property
     def configured(self) -> bool:
         return self.enabled and self.token is not None
@@ -261,6 +269,28 @@ class CacheSettings(BaseModel):
     max_entries: int = Field(default=10_000, ge=1)
     redis_url: str = "redis://localhost:6379/0"
     key_prefix: str = "air:clf:"
+
+
+# ── Audit ─────────────────────────────────────────────────────────────────────
+
+
+class AuditSettings(BaseModel):
+    """An operational log of classification jobs, for support review — not
+    customer state. Unlike `cache`, there is no zero-config in-process
+    fallback: `backend` defaults to `"none"` so nobody starts writing to a
+    database nobody configured.
+    """
+
+    backend: Literal["mongo", "none"] = "none"
+    mongo_url: str = "mongodb://localhost:27017"
+    database: str = "air_classifier"
+    collection: str = "audit_log"
+    #: Native Mongo TTL index; entries self-expire, no cleanup job needed.
+    ttl_days: int = Field(default=30, ge=1)
+    #: Bounded queue in front of the background writer. A slow or down Mongo
+    #: drops the newest entries past this size rather than blocking requests.
+    queue_max_size: int = Field(default=1000, ge=1)
+    drain_timeout_s: float = Field(default=2.0, gt=0)
 
 
 # ── Resilience ────────────────────────────────────────────────────────────────
@@ -328,6 +358,7 @@ class Settings(BaseSettings):
     air_llm: AirLlmSettings = Field(default_factory=AirLlmSettings)
     classifier: ClassifierSettings = Field(default_factory=ClassifierSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
+    audit: AuditSettings = Field(default_factory=AuditSettings)
     resilience: ResilienceSettings = Field(default_factory=ResilienceSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     obs: ObservabilitySettings = Field(default_factory=ObservabilitySettings)

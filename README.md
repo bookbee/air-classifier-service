@@ -126,6 +126,78 @@ billed calls: the cheap model answers, and below `AIR_LLM__ARBITRATION_FLOOR` (0
 arbiter model is asked as well. `options.max_cost_usd` (default $0.05) caps a single
 request, and `AIR_LLM__ARBITRATION_ENABLED=false` turns the second call off entirely.
 
+`AIR_LLM__SUMMARY_MODEL` (default `summarize-default`) is a fourth alias in the same
+family, asked only by `/v1/summary/refresh`'s narrative step (below) — its own alias
+because a narrative-refresh failure degrades gracefully rather than escalating, so it
+needs no cross-vendor failover chain of its own.
+
+## Customer summary refresh
+
+`POST /v1/summary/refresh` gives a caller a running, human-readable summary of one
+customer's feedback and reviews over time — without this service storing anything about
+that customer. Every call is self-contained: send the summary you were handed last time
+back as `existing_summary` (or omit it, for a customer's first-ever summary) alongside
+the new text to fold in, and store whatever comes back in its place.
+
+```bash
+curl -s http://127.0.0.1:8082/v1/summary/refresh \
+  -H 'Content-Type: application/json' -H 'X-API-Key: airc_local_dev_key' \
+  -d '{
+    "customer_id": "cust_482",
+    "items": [
+      { "text": "The battery life is superb but the camera is a letdown.",
+        "source_type": "review", "rating": 4 },
+      { "text": "Support replied within minutes, very helpful team.",
+        "source_type": "feedback" }
+    ]
+  }'
+```
+
+```jsonc
+{
+  "request_id": "req_01JQ…",
+  "customer_id": "cust_482",
+  "summary": {
+    "narrative": "A generally positive customer who values responsive support; product quality is a mild, recurring concern.",
+    "rollup": {
+      "total_items": 2,
+      "counts_by_source_type": { "review": 1, "feedback": 1 },
+      "sentiment_counts": { "mixed": 1, "positive": 1 },
+      "urgency_counts": { "medium": 1, "low": 1 },
+      "topic_counts": { "product_quality": 1 },
+      "rating_count": 1, "rating_sum": 4.0, "average_rating": 4.0,
+      "recent_ratings": [4.0], "recent_average_rating": 4.0,
+      "first_seen_at": "2026-09-05T15:17:09.535Z",
+      "last_seen_at": "2026-09-05T15:17:09.535Z"
+    },
+    "version": 1
+  },
+  "items": [ /* one ClassifyBatchItem per request item, same shape as /v1/classify/batch's */ ],
+  "degraded": false,
+  "usage": { "tiers_run": 4, "tokens_in": 0, "tokens_out": 0, "est_cost_usd": 0.0 },
+  "latency_ms": 192.7
+}
+```
+
+On the *next* call for the same customer, send `summary` from this response back as
+`existing_summary` alongside only the newest items — `rollup` accumulates onto it
+(histograms grow, `recent_ratings` slides its window) and `narrative` is rewritten with
+both old and new items in view, not just the latest batch.
+
+Two properties worth relying on:
+
+- **Every item is classified through the same ladder `/v1/classify` uses** — `items` in
+  the response is a list of `ClassifyBatchItem`, byte-for-byte the same shape
+  `/v1/classify/batch` returns, so existing tooling that already parses one parses the
+  other. A per-item failure isolates the same way: that item's slot carries a
+  `ProblemDetail`, its siblings and the rollup are unaffected.
+- **The narrative step degrades, it never fails the call.** If air-llm (or specifically
+  `AIR_LLM__SUMMARY_MODEL`) is unreachable or unconfigured, the response still comes back
+  `200` with a freshly computed `rollup`, `degraded: true`, and `narrative` carried over
+  unchanged from `existing_summary`. The only way this route ever fails outright is the
+  same one `/v1/classify` shares — a batch-size or auth/validation problem, never "the
+  summarizer was down."
+
 ## Demo — exercising every tier on purpose
 
 ```bash
@@ -232,12 +304,13 @@ The types live in [`src/air_classifier/config.py`](src/air_classifier/config.py)
 
 ## API
 
-One analysis route plus four operational ones, returning RFC 9457
-`application/problem+json` on error.
+Two analysis routes plus a stateless summary-refresh route and three operational
+ones, returning RFC 9457 `application/problem+json` on error.
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `POST` | `/v1/classify`, `/v1/classify/batch` | `X-API-Key` | Analyse one text, or many in one call |
+| `POST` | `/v1/summary/refresh` | `X-API-Key` | Fold new feedback/reviews into a caller-supplied customer summary and return the updated one; this service stores nothing |
 | `GET` | `/v1/health`, `/v1/ready` | None | Liveness, tier readiness — open for a kubelet or load balancer |
 | `GET` | `/v1/capabilities` | `X-API-Key` | Tier inventory, model versions, live scorer backend — deployment detail, not a probe |
 | `GET` | `/metrics` | None (network-restrict in production) | Prometheus exposition |

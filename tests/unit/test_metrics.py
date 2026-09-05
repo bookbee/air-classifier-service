@@ -23,6 +23,7 @@ CATALOGUE = (
     "air_classifier_breaker_state",
     "air_classifier_degraded_responses_total",
     "air_classifier_pii_redactions_total",
+    "air_classifier_audit_events_total",
 )
 
 
@@ -240,6 +241,17 @@ def test_record_pii_redaction_counts_spans() -> None:
     metrics.record_pii_redaction(PIIKind.EMAIL)
 
     assert sample("air_classifier_pii_redactions_total", kind=PIIKind.EMAIL.value) == before + 4
+
+
+def test_record_audit_event_counts_by_result() -> None:
+    before = sample("air_classifier_audit_events_total", result=metrics.AuditEvent.WRITTEN.value)
+
+    metrics.record_audit_event(metrics.AuditEvent.WRITTEN)
+
+    assert (
+        sample("air_classifier_audit_events_total", result=metrics.AuditEvent.WRITTEN.value)
+        == before + 1
+    )
 
 
 # ── Timer ─────────────────────────────────────────────────────────────────────
