@@ -36,28 +36,7 @@ are optional — a bare checkout with nothing configured still boots and serves 
 
 ## Commands
 
-```bash
-make install          # .venv + service with every runtime extra
-make dev              # + pytest, ruff, mypy
-make env              # .env from .env.example (seeds the dev API key)
-make run              # serve in this terminal, autoreload, Ctrl+C stops it
-make start/status/restart/stop   # serve in background, logs to .run/service.log
-make doctor           # check redis/air-llm/model-artifact reachability
-
-make test             # whole suite
-make test-unit        # tests/unit only, no external services
-make test-integration # tests/integration, multi-component wiring, no external services (marked `integration`)
-make test-eval        # tests/eval golden set, no external services
-make test-eval-live   # tests/eval T2/T3 cases against a real reachable air-llm (needs AIR_LLM_TOKEN/BASE_URL)
-
-make lint             # ruff check + format --check
-make fmt              # ruff format + check --fix
-make typecheck        # mypy --strict
-make check            # lint + typecheck + test — what CI runs
-
-make openapi          # regenerate docs/openapi.json from the live app
-make up / down / logs # run as a container, joined to air-infra's network
-```
+`make help` lists every target with a one-line description.
 
 Single test: `.venv/bin/pytest tests/unit/test_policy.py::test_name -q`.
 Tests mirror `src/` under `tests/unit/`; `tests/integration/` and `tests/contract/` cover
