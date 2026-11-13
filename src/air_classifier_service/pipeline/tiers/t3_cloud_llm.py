@@ -79,7 +79,8 @@ class CloudLLMTier:
         dependency = provider.name.value
         self._bulkhead = bulkhead or Bulkhead.from_settings(dependency, settings.resilience)
         self._breaker = breaker or CircuitBreaker.from_settings(dependency, settings.resilience)
-        self.model_version = self._config.cloud_model
+        # The class asked for (`auto`); the concrete model is per answer.
+        self.model_version: str = self._config.cloud_model.value
 
     async def is_available(self) -> bool:
         if not self._provider.configured or not self._breaker.is_closed:
@@ -280,6 +281,7 @@ class CloudLLMTier:
                 max_tokens=max_tokens,
                 cache_prefix=True,
                 remaining_ms=timeout_s * 1000.0,
+                request_id=ctx.request_id,
             )
         except ProviderRefusalError as exc:
             raise TierError(f"cloud provider refused: {exc}") from exc

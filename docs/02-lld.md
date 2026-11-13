@@ -769,6 +769,27 @@ deliberate: it pins the ladder's semantics while they are still cheap to change.
 Corrections to this document worth leaving a trace of, newest first. Each entry says what
 changed and why; the *current* behaviour is described in the sections above, not here.
 
+- **Model calls moved from air-llm's `POST /v1/inference` to air-model-gateway's
+  `POST /v1/generate`, 2026-11-13.** air-llm was replaced by air-model-gateway, which has
+  removed `/v1/inference` and the alias names it resolved. This service now asks for a
+  *model class* (`local`, `auto`, `cloud`, `constants.ModelClass`) rather than an alias:
+  Tier 2 and the summary narrative `local`, Tier 3 `auto`, the arbiter `cloud`. The
+  gateway's per-service routing override (its `deploy/routing.yaml`,
+  `overrides.air-classifier-service`) keeps each class's guarantees: `local` is one local
+  rung with no fallback, so a local outage still fails the call and this ladder decides
+  what's next; `auto` is cloud-only and cheap-end; `cloud` holds the strongest models.
+  The old Tier-2 `provider:model` bypass would now be a `pin`, which needs a grant this
+  service neither has nor needs. The `*_MODEL` settings are typed as `ModelClass`, so a
+  retired alias fails at startup instead of 422-ing every call. The adapter also
+  (a) no longer sends `task` (the gateway's body is `extra="forbid"`); (b) forwards
+  `X-Request-ID`; (c) maps a 4xx other than 429 to a new `ProviderRequestError` and logs it
+  at error level, because filing a contract or config break under "unavailable" let the
+  ladder degrade every request to Tier 1 behind 200s; (d) tells 429 `budget_exceeded`
+  (the gateway's per-service daily budget, clears at the next UTC day) apart from
+  `rate_limited` as `ProviderBudgetExceededError`. `Provider` gains `llama.cpp`, the
+  gateway's self-hosted slot. The `AIR_LLM__*` setting names and the `AirLlm*` code names
+  are unchanged by this entry.
+
 - **Service renamed `air-classifier` → `air-classifier-service`, 2026-09-05.** Aligns with
   the AIR platform's naming convention ahead of the git repository itself being renamed. Full
   rename: the Python package (`src/air_classifier/` → `src/air_classifier_service/`, every

@@ -96,21 +96,21 @@ def test_overriding_one_air_llm_key_preserves_the_others(
     monkeypatch.setenv("AIR_CLASSIFIER__AIR_LLM__TIMEOUT_S", "45")
     air_llm = Settings().air_llm
     assert air_llm.timeout_s == 45.0
-    assert air_llm.cloud_model == "classify-default"
+    assert air_llm.cloud_model == "auto"
     assert air_llm.max_tokens == 2048
-    assert air_llm.summary_model == "summarize-default"
+    assert air_llm.summary_model == "local"
     assert air_llm.summary_max_tokens == 512
 
 
 def test_overriding_the_summary_model_preserves_its_siblings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("AIR_CLASSIFIER__AIR_LLM__SUMMARY_MODEL", "summarize-custom")
+    monkeypatch.setenv("AIR_CLASSIFIER__AIR_LLM__SUMMARY_MODEL", "cloud")
     air_llm = Settings().air_llm
-    assert air_llm.summary_model == "summarize-custom"
+    assert air_llm.summary_model == "cloud"
     assert air_llm.summary_max_tokens == 512
     assert air_llm.summary_timeout_s == 10.0
-    assert air_llm.cloud_model == "classify-default"
+    assert air_llm.cloud_model == "auto"
 
 
 def test_overriding_one_audit_key_preserves_the_others(

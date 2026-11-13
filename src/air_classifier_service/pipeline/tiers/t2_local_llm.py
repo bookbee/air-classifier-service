@@ -77,7 +77,8 @@ class LocalLLMTier:
         self._settings = settings
         self._provider = provider
         self._model = settings.air_llm.local_model
-        self.model_version = self._model
+        # The class asked for (`local`); the concrete model is per answer.
+        self.model_version: str = self._model.value
 
         # Both guards are named after the *dependency*, not the rung: they exist
         # to protect one daemon, so anything else that reaches it must be able to
@@ -204,6 +205,7 @@ class LocalLLMTier:
                 max_tokens=_MAX_OUTPUT_TOKENS,
                 cache_prefix=False,
                 remaining_ms=timeout_s * 1000.0,
+                request_id=ctx.request_id,
             )
         except ProviderSchemaError:
             raise

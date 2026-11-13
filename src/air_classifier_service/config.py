@@ -4,7 +4,7 @@ Configuration is 12-factor: every value below is settable from the environment
 using the ``AIR_CLASSIFIER__`` prefix and ``__`` as the nesting delimiter, e.g.::
 
     AIR_CLASSIFIER__TIERS__T1__CONFIDENCE_FLOOR=0.85
-    AIR_CLASSIFIER__AIR_LLM__CLOUD_MODEL=classify-default
+    AIR_CLASSIFIER__AIR_LLM__CLOUD_MODEL=auto
 
 Escalation thresholds live here rather than in code on purpose: tuning the
 ladder's cost/accuracy balance must never require deploying new logic, only new
@@ -20,7 +20,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from air_classifier_service.constants import Tier
+from air_classifier_service.constants import ModelClass, Tier
 
 # ── Application ───────────────────────────────────────────────────────────────
 
@@ -160,53 +160,60 @@ class TiersSettings(BaseModel):
 
 
 class AirLlmSettings(BaseModel):
-    """Every model call — Tier 2 and Tier 3 both — routes through air-llm.
+    """Every model call — Tier 2, Tier 3 and the summary narrative — goes through
+    air-model-gateway's ``POST /v1/generate``.
 
-    air-llm is the platform's single model gateway: it owns the provider keys,
-    cross-vendor routing and failover, cost accounting and caching. Which
-    concrete model or vendor answers a given call is entirely air-llm's
-    decision, made from its own config (``deploy/routing.yaml`` in the air-llm
-    repo) — this service names only its *own* aliases below and never a
-    vendor or model directly, and holds no provider SDKs or credentials of
-    its own. What stays this service's job is the escalation decision: is the
-    answer air-llm returned good enough, or does the ladder climb (§6,
-    docs/02-lld.md)? air-llm is the enabler that makes a better answer
-    reachable at all; which one, and at what cost, is a routing decision this
-    service deliberately does not make or hardcode.
+    The gateway is the platform's single model gateway: it owns provider keys,
+    cross-vendor routing and failover, cost accounting, budgets and caching.
+    This service never names a vendor or a model. Each call names a
+    :class:`ModelClass` (``local``, ``auto`` or ``cloud``), and the gateway
+    resolves that class to an ordered chain from its ``deploy/routing.yaml``,
+    where ``overrides.air-classifier-service`` tunes the chains for this
+    service alone. What stays this service's job is the escalation decision:
+    is the answer that came back good enough, or does the ladder climb
+    (§6, docs/02-lld.md)?
 
-    All three aliases below are this service's *own* — defined in air-llm's
-    routing config for air-classifier specifically, not shared general-purpose
-    aliases another consumer might repoint for its own needs. Two are single
-    entries with no cross-vendor failover by design; one is not, and the
-    difference is deliberate, not an inconsistency:
+    The three classes are not interchangeable, and which rung asks for which
+    is deliberate:
 
-    - ``local_model`` (Tier 2) resolves to exactly one provider. A local
-      runtime being down must fail this call cleanly so *this* service's own
-      ladder escalates to Tier 3, rather than air-llm silently substituting a
-      different tier of model under the Tier-2 label — which would blur tier
-      attribution and cost accounting.
-    - ``cloud_model`` (Tier 3's default call) and ``arbiter_model`` (Tier 3's
-      second opinion) each resolve to an ordered, cross-vendor chain — an
-      outage on one vendor must not remove the whole tier, and that failover
-      *is* air-llm's job now, not a registry in this codebase.
+    - ``local_model`` (Tier 2) is ``local``: in this service's override a
+      single local rung with no fallback. A local runtime being down must
+      fail this call cleanly so *this* service's ladder escalates to Tier 3,
+      rather than the gateway quietly substituting a cloud model under the
+      Tier-2 label, which would blur tier attribution and cost accounting.
+      (The old route did this with a bare ``provider:model`` bypass; on
+      ``/v1/generate`` that would be a ``pin``, which needs a grant this
+      service does not have and does not need.)
+    - ``cloud_model`` (Tier 3's default call) is ``auto``: in this service's
+      override a cloud-only, cheap-end, cross-vendor chain. An outage at one
+      vendor must not remove the whole tier, and that failover is the
+      gateway's job.
+    - ``arbiter_model`` (Tier 3's second opinion) is ``cloud``: the
+      strongest models, also cross-vendor.
+
+    The gateway does not accept the alias names the retired
+    ``/v1/inference`` route did (``classify-local``, ``classify-default``,
+    ...): those are now a startup validation error here rather than a 422 on
+    every call.
     """
 
     enabled: bool = True
     base_url: str = "http://localhost:8083"
-    #: air-llm service token, sent as ``X-API-Key``. air-llm's own policy
-    #: grants the "air-classifier" service `[chat, embeddings]` on `inference`.
+    #: Service token, sent as ``X-API-Key``. The gateway maps it to the
+    #: ``air-classifier-service`` identity, whose policy entry grants
+    #: ``generate`` and sets this service's rate limit and daily budget.
     token: SecretStr | None = None
     timeout_s: float = Field(default=20.0, gt=0)
 
-    # Tier 2 — local, a single-entry alias (see class docstring).
-    local_model: str = "classify-local"
+    # Tier 2: local only, one rung, no fallback (see class docstring).
+    local_model: ModelClass = ModelClass.LOCAL
 
-    # Tier 3 — cloud, cross-vendor-failover aliases, each owned by this service.
-    cloud_model: str = "classify-default"
-    arbiter_model: str = "classify-arbiter"
+    # Tier 3: cross-vendor cloud chains, cheap first, strongest for arbitration.
+    cloud_model: ModelClass = ModelClass.AUTO
+    arbiter_model: ModelClass = ModelClass.CLOUD
     arbitration_enabled: bool = True
     arbitration_floor: float = Field(default=0.65, ge=0.0, le=1.0)
-    #: Sized for whichever provider an alias's chain might actually reach, not
+    #: Sized for whichever provider a class's chain might actually reach, not
     #: just the primary one — some providers in the configured chains bill
     #: reasoning ("thinking") tokens as output, which can starve a ceiling
     #: sized only for the cheapest member before the model ever reaches the
@@ -217,11 +224,11 @@ class AirLlmSettings(BaseModel):
     max_tokens: int = Field(default=2048, ge=64, le=8192)
     arbiter_max_tokens: int = Field(default=4096, ge=64, le=16384)
 
-    # Customer-summary narrative refresh (pipeline/summary_service.py) — a
-    # single-entry alias like `local_model`: no cross-vendor failover, because
-    # a narrative refresh failing outright degrades to the caller's prior
-    # narrative unchanged, so there is no ladder above it to protect.
-    summary_model: str = "summarize-default"
+    # Customer-summary narrative refresh (pipeline/summary_service.py): local,
+    # like Tier 2, with no fallback on purpose. A failed narrative refresh
+    # degrades to the caller's prior narrative unchanged, so there is no
+    # ladder above it to protect and no reason to pay for a cloud model.
+    summary_model: ModelClass = ModelClass.LOCAL
     summary_max_tokens: int = Field(default=512, ge=64, le=4096)
     summary_timeout_s: float = Field(default=10.0, gt=0)
 

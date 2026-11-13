@@ -304,7 +304,7 @@ def _provider_result(narrative: str = "Updated narrative.") -> ProviderResult:
     return ProviderResult(
         parsed=LLMSummaryOutput(narrative=narrative),
         provider=Provider.ANTHROPIC,
-        model="summarize-default",
+        model="llama3.2:3b",
         tokens_in=10,
         tokens_out=5,
         latency_ms=5.0,
@@ -338,6 +338,18 @@ async def test_first_time_summary_gets_version_one() -> None:
     assert response.summary.version == 1
     assert response.summary.rollup.total_items == 1
     assert response.degraded is False
+
+
+async def test_the_narrative_call_forwards_the_request_id() -> None:
+    provider = StubProvider()
+    service = _service([TEXT_A], provider)
+    request = SummaryRefreshRequest(
+        customer_id="cust_1", items=[_item(TEXT_A, source_type="feedback")]
+    )
+
+    await service.refresh(request, request_id="req_1", options=None)
+
+    assert [call["request_id"] for call in provider.calls] == ["req_1"]
 
 
 async def test_narrative_refresh_success_updates_the_narrative() -> None:

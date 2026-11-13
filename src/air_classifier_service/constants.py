@@ -73,12 +73,45 @@ class Label(StrEnum):
 
 
 class Provider(StrEnum):
-    """LLM backends. Ollama is local; the rest are remote and metered."""
+    """Who answered a model call, as air-model-gateway reports it.
+
+    A label for usage/cost attribution, never something this service routes
+    on: which provider serves a call is the gateway's decision. Ollama and
+    llama.cpp are local (free); the rest are remote and metered. Mirrors the
+    gateway's own `Provider` values, so an answer from any of them is
+    attributed to the provider that actually served it rather than falling
+    back to the calling tier's label.
+    """
 
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     GEMINI = "gemini"
     OLLAMA = "ollama"
+    #: The gateway's OpenAI-wire-compatible self-hosted slot.
+    LLAMA_CPP = "llama.cpp"
+
+
+class ModelClass(StrEnum):
+    """What a model call asks air-model-gateway for: *where* the model runs,
+    never which model.
+
+    The gateway resolves a class to an ordered chain of concrete models from
+    its own ``deploy/routing.yaml``, with a per-service override for this
+    service, so the chain behind each class is the gateway owner's to tune.
+    The values are the gateway's wire vocabulary and are config values here
+    (``AIR_LLM__*_MODEL``), so they are public surface on both sides.
+    """
+
+    #: Our own hardware; the prompt never leaves the network. This service's
+    #: gateway override makes it a single rung with no fallback, so a local
+    #: outage fails the call and *this* service's ladder decides what's next.
+    LOCAL = "local"
+    #: The gateway's choice. This service's override makes it cloud-only, at
+    #: the cheap end, because Tier 3 is only reached once local wasn't enough.
+    AUTO = "auto"
+    #: Cloud providers. This service's override puts the strongest models
+    #: here, for arbitration.
+    CLOUD = "cloud"
 
 
 class EscalationReason(StrEnum):

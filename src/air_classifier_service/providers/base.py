@@ -2,7 +2,7 @@
 
 One protocol covers both the local and the cloud tiers. The local tier is not
 a special case — it is a model that happens to be free and nearby, with which
-concrete model that even is left entirely to air-llm's own routing — so Tiers
+concrete model that even is left entirely to air-model-gateway's routing — so Tiers
 2 and 3 share their prompt building, schema derivation, and validation
 entirely.
 """
@@ -13,7 +13,7 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from air_classifier_service.constants import Provider
+from air_classifier_service.constants import ModelClass, Provider
 from air_classifier_service.schemas.common import TierUsage
 
 
@@ -31,6 +31,38 @@ class ProviderRateLimitError(ProviderError):
     def __init__(self, message: str, retry_after_s: float | None = None) -> None:
         super().__init__(message)
         self.retry_after_s = retry_after_s
+
+
+class ProviderBudgetExceededError(ProviderRateLimitError):
+    """This service's daily model budget at the gateway is spent.
+
+    A rate limit only in transport (the gateway answers 429), not in meaning:
+    it does not clear in seconds but at the next UTC day, so nothing here
+    should retry it, and an operator reading the trace needs to tell "spend
+    ceiling reached" apart from "briefly throttled". A subclass so every
+    existing ``ProviderRateLimitError`` handler still treats it as a
+    throttle, while the class name it carries into a failed tier's trace
+    says which one it was.
+    """
+
+
+class ProviderRequestError(ProviderError):
+    """The gateway refused the request itself, not the model's capacity.
+
+    A 4xx other than 429: an invalid body, a model class or field the gateway
+    doesn't accept, a missing grant, a bad token, a wrong base URL, or every
+    model in the chain rejecting the input as invalid (``provider_rejected``).
+    Retrying the identical request can't succeed, and nor is it an outage —
+    usually it is a configuration or contract bug on *this* side. It is kept
+    apart from :class:`ProviderUnavailableError` because the ladder treats
+    "unavailable" as a capacity gap (``degraded: true``, climb on), which
+    would let a contract break hide behind healthy-looking 200s.
+    """
+
+    def __init__(self, message: str, *, status: int, code: str | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
 
 
 class ProviderSchemaError(ProviderError):
@@ -101,10 +133,11 @@ class LLMProvider(Protocol):
         system_prompt: str,
         user_content: str,
         output_model: type[BaseModel],
-        model: str,
+        model: ModelClass,
         max_tokens: int,
         cache_prefix: bool = True,
         remaining_ms: float | None = None,
+        request_id: str | None = None,
     ) -> ProviderResult:
         """Run one constrained completion.
 
@@ -114,7 +147,8 @@ class LLMProvider(Protocol):
                 per-caller interpolation above the cache breakpoint.
             user_content: The volatile part. Everything request-specific goes here.
             output_model: Pydantic model the response must validate against.
-            model: Provider-specific model identifier.
+            model: Which class of model to ask for. Never a concrete model:
+                the gateway resolves the class to its chain.
             max_tokens: Output ceiling.
             cache_prefix: Request prompt caching of the system prefix where the
                 provider supports it.
@@ -127,10 +161,16 @@ class LLMProvider(Protocol):
                 answer that will already have been discarded by the time it
                 would arrive, rather than to enforce anything on this side that
                 the timeout this call is wrapped in does not already enforce.
+            request_id: This service's request id, forwarded so one id follows
+                a request through this service's logs and the gateway's
+                audit line.
 
         Raises:
             ProviderUnavailableError: Not configured or unreachable.
             ProviderRateLimitError: Throttled.
+            ProviderBudgetExceededError: The daily budget is spent (a
+                ``ProviderRateLimitError`` subclass).
+            ProviderRequestError: The request itself was refused (a 4xx).
             ProviderSchemaError: Output failed validation.
             ProviderRefusalError: Declined by the provider's safety layer.
         """

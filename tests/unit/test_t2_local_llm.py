@@ -25,7 +25,7 @@ from air_classifier_service.config import (
     TierSettings,
     TiersSettings,
 )
-from air_classifier_service.constants import Label, Provider, Tier
+from air_classifier_service.constants import Label, ModelClass, Provider, Tier
 from air_classifier_service.observability import metrics
 from air_classifier_service.pipeline.features import extract_features
 from air_classifier_service.pipeline.tiers import base as tier_base
@@ -128,7 +128,7 @@ def _result(parsed: LLMSentimentOutput | None = None, **overrides: Any) -> Provi
     return ProviderResult(**fields)
 
 
-def _settings(*, timeout_ms: int = 4000, model: str = MODEL) -> Settings:
+def _settings(*, timeout_ms: int = 4000, model: ModelClass = ModelClass.LOCAL) -> Settings:
     return Settings(
         app=AppSettings(env="test"),
         tiers=TiersSettings(t2_local_llm=TierSettings(timeout_ms=timeout_ms)),
@@ -175,7 +175,7 @@ def test_the_rung_identifies_itself_and_the_model_behind_it() -> None:
     tier = _tier(StubProvider())
 
     assert tier.tier is Tier.T2_LOCAL_LLM
-    assert tier.model_version == MODEL
+    assert tier.model_version == ModelClass.LOCAL
 
 
 def test_every_language_is_attempted_because_the_model_is_prompted_not_trained() -> None:
@@ -251,8 +251,10 @@ async def test_the_rung_sends_the_compact_prefix_and_the_shared_schema() -> None
     assert call["system_prompt"] == compact_system_prompt()
     assert call["system_prompt"] != system_prompt()
     assert call["output_model"] is LLMSentimentOutput
-    assert call["model"] == MODEL
+    assert call["model"] is ModelClass.LOCAL
     assert call["max_tokens"] > 0
+    # Forwarded so one id follows the request into the gateway's audit line.
+    assert call["request_id"] == "req_test"
 
 
 async def test_the_user_turn_carries_the_text_and_the_task_framing() -> None:

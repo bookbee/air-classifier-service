@@ -17,7 +17,7 @@ KEY="${KEY:-airc_local_dev_key}"
 only="${1:-all}"
 
 # air-llm's own address, not this service's — T2 goes through it now, and
-# whichever local runtime currently answers classify-local has its own
+# whichever local runtime currently answers the `local` class has its own
 # eviction window between calls (minutes, not hours) after which the *next*
 # T2 call pays a full cold model load on top of real generation time, which
 # routinely exceeds TIERS__T2_LOCAL_LLM__TIMEOUT_MS (6s default) — that
@@ -25,14 +25,16 @@ only="${1:-all}"
 # T2 case below stays warm for the rest of this run.
 AIR_LLM_BASE="${AIR_LLM_BASE:-http://127.0.0.1:8083}"
 AIR_LLM_TOKEN="${AIR_LLM_TOKEN:-air-classifier-dev}"
-AIR_LLM_LOCAL_MODEL="${AIR_LLM_LOCAL_MODEL:-classify-local}"
+AIR_LLM_LOCAL_MODEL="${AIR_LLM_LOCAL_MODEL:-local}"
 
 warm_local_llm() {
+  # cache:false: the gateway caches identical requests per service, and a
+  # cached "hi" would return instantly without ever loading the model.
   printf '\n\033[2mwarming %s via air-llm…\033[0m' "$AIR_LLM_LOCAL_MODEL"
   started=$(date +%s%N)
-  curl -s -m 60 -X POST "$AIR_LLM_BASE/v1/inference" \
+  curl -s -m 60 -X POST "$AIR_LLM_BASE/v1/generate" \
     -H "X-API-Key: $AIR_LLM_TOKEN" -H 'Content-Type: application/json' \
-    -d "{\"task\":\"chat\",\"model\":\"$AIR_LLM_LOCAL_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}" \
+    -d "{\"model\":\"$AIR_LLM_LOCAL_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8,\"cache\":false}" \
     -o /dev/null -w '%{http_code}' | { read -r code
       elapsed_ms=$(( ($(date +%s%N) - started) / 1000000 ))
       if [ "$code" = "200" ]; then
