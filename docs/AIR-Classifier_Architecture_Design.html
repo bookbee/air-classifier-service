@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>air-classifier-service Architecture</title>
+<style>
+  :root {
+    --bg: #f5f4ef; --card: #f8f7f3; --ink: #1f2f4d; --muted: #5b6b85;
+    --line: #2b3d5c; --warm: #b8601c; --warm-bg: #fdf3e9; --warm-line: #d9894a;
+    --ext: #6f7d92; --ok: #2f6b4f;
+  }
+  @page { size: 1440px 2560px; margin: 0; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); }
+  body {
+    width: 1440px; padding: 30px 30px 40px; color: var(--ink);
+    font: 11px/1.55 Menlo, "SF Mono", Consolas, monospace;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  h1 { font-size: 22px; letter-spacing: .14em; margin: 0; font-weight: 700; }
+  h2 { font-size: 15px; letter-spacing: .14em; margin: 28px 0 12px; font-weight: 700; text-transform: uppercase; }
+  h3 { font-size: 11px; letter-spacing: .06em; margin: 0 0 6px; font-weight: 700; text-transform: uppercase; }
+  .sub { color: var(--muted); letter-spacing: .1em; font-size: 10.5px; margin-top: 4px; text-transform: uppercase; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; }
+  .legend { border: 1.5px solid var(--line); padding: 6px 10px; display: flex; gap: 14px; align-items: center; font-size: 9.5px; letter-spacing: .08em; white-space: nowrap; }
+  .legend span { display: inline-flex; gap: 6px; align-items: center; }
+  .sw { display: inline-block; width: 18px; height: 11px; border: 1.5px solid var(--line); background: var(--card); }
+  .tag { display: inline-block; font-size: 8.5px; font-weight: 700; padding: 1px 5px; color: #fff; letter-spacing: .06em; vertical-align: 1px; }
+  .tag.prod { background: var(--warm); }
+  .tag.ext { background: var(--ext); }
+  .box { border: 1.5px solid var(--line); background: var(--card); padding: 10px 12px; }
+  .box.ext { border-color: var(--ext); }
+  .box.warm { border-color: var(--warm-line); background: var(--warm-bg); color: #8a4a17; }
+  .box.warm h3 { color: var(--warm); }
+  .box.heavy { border-width: 2px; box-shadow: 5px 5px 0 #dcdcd6; }
+  .muted { color: var(--muted); }
+  .warmtxt { color: var(--warm); }
+  .code { border: 1px solid #c9ccd3; background: #fbfbf8; padding: 6px 8px; margin: 4px 0; white-space: pre; font-size: 10.5px; }
+  .note { color: var(--muted); font-size: 10px; margin-top: 4px; }
+  ul { margin: 4px 0 0; padding-left: 0; list-style: none; }
+  li { margin: 2px 0; padding-left: 12px; position: relative; }
+  li::before { content: "▪"; position: absolute; left: 0; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; vertical-align: top; padding: 3px 8px 3px 0; }
+  th { font-size: 9.5px; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; border-bottom: 1px solid #c9ccd3; }
+  td { border-bottom: 1px dotted #d6d7d2; }
+  tr:last-child td { border-bottom: 0; }
+  b { font-weight: 700; }
+
+  /* system diagram */
+  .cluster { border: 1.5px dashed var(--muted); padding: 22px 14px 14px; position: relative; margin-top: 26px; }
+  .cluster > .label { position: absolute; top: -8px; left: 14px; background: var(--bg); padding: 0 8px; letter-spacing: .1em; font-size: 9.5px; color: var(--muted); }
+  .sys { display: grid; grid-template-columns: 210px 34px 1fr 34px 300px; align-items: stretch; }
+  .col { display: flex; flex-direction: column; gap: 12px; }
+  .arrows { display: flex; flex-direction: column; justify-content: space-around; align-items: center; font-size: 18px; color: var(--line); }
+  .svc { border: 2px solid var(--line); padding: 20px 12px 12px; position: relative; background: var(--bg); box-shadow: 6px 6px 0 #dcdcd6; }
+  .svc > .label { position: absolute; top: -9px; left: 12px; background: var(--bg); padding: 0 8px; font-weight: 700; letter-spacing: .1em; font-size: 11px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  .stack { display: flex; flex-direction: column; gap: 12px; }
+
+  .ladder { display: grid; grid-template-columns: 1fr 18px 1fr 18px 1fr 18px 1fr; align-items: stretch; margin-top: 6px; }
+  .rung { border: 1.5px solid var(--line); background: #fff; padding: 7px 8px; font-size: 10px; }
+  .rung .t { font-weight: 700; font-size: 11px; }
+  .rung.llm { border-color: var(--warm-line); background: var(--warm-bg); }
+  .step { display: flex; align-items: center; justify-content: center; color: var(--line); font-size: 13px; }
+  .flow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+  .flow .s { border: 1px solid var(--line); background: #fff; padding: 4px 7px; font-size: 10px; }
+  .flow .s.w { border-color: var(--warm-line); background: var(--warm-bg); color: #8a4a17; }
+  .flow .a { color: var(--line); }
+  .order { counter-reset: n; display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .order span { border: 1px solid #c9ccd3; background: #fff; padding: 3px 6px; font-size: 9.5px; }
+  .order span.hard { border-color: var(--warm-line); background: var(--warm-bg); color: #8a4a17; }
+  hr.rule { border: 0; border-top: 2px solid var(--line); margin: 34px -30px 0; }
+  .changes td:first-child { width: 22%; color: var(--muted); }
+  .changes td:nth-child(2) { width: 32%; text-decoration: line-through; text-decoration-color: #b9bcc4; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>air-classifier-service — ARCHITECTURE &amp; DESIGN</h1>
+    <div class="sub">Text classification for the AIR platform · four-tier escalation ladder · Rev C · as built · 2026-11-13 · supersedes Rev B</div>
+  </div>
+  <div class="legend">
+    <span><i class="sw"></i>IN THIS REPO</span>
+    <span><i class="tag prod">+PROD</i>PRODUCTION REQUIREMENT</span>
+    <span><i class="tag ext">EXT</i>OTHER PROJECT / MANAGED</span>
+  </div>
+</div>
+
+<!-- ================= SYSTEM CONTEXT ================= -->
+<div class="cluster">
+  <div class="label">PLATFORM NETWORK — EAST-WEST ONLY · CALLERS AUTHENTICATE WITH X-API-KEY · /metrics REACHABLE BY PROMETHEUS ONLY</div>
+  <div class="sys">
+
+    <!-- callers -->
+    <div class="col">
+      <div class="box heavy">
+        <h3>air-platform</h3>
+        <div class="muted">chat entry point for external applications · calls /v1/classify per message</div>
+        <div class="code">auth: X-API-Key</div>
+      </div>
+      <div class="box">
+        <h3>air-client</h3>
+        <div class="muted">typed client, generated from this repo's <b>docs/openapi.json</b> — the API contract</div>
+      </div>
+      <div class="box">
+        <h3>Peer services</h3>
+        <div class="muted">review ingest · feedback pipelines · CRM &amp; support tooling · use /classify/batch and /summary/refresh</div>
+      </div>
+      <div class="box warm">
+        <h3>One key, three controls</h3>
+        Each API key carries <b>scopes</b>, a <b>max_tier</b> ceiling (e.g. keep a caller on-prem at T2) and its own <b>rate limit</b>. Keys are stored only as salted SHA-256 hashes.
+      </div>
+    </div>
+
+    <div class="arrows"><span>⟷</span><span>⟷</span><span>⟷</span></div>
+
+    <!-- the service -->
+    <div class="svc">
+      <div class="label">air-classifier-service — OWN REPO · OWN IMAGE · STATELESS REPLICAS</div>
+      <div class="muted" style="margin-bottom:10px">Sentiment · tone · topics · intent · urgency · routing · requires-human · actionability · aspects · rating consistency — whichever the text and the ladder's reach support. Every response records how far it climbed and why (<b>escalation_trace</b>).</div>
+
+      <div class="grid2">
+        <div class="box">
+          <h3>API — /v1 <span class="muted" style="font-weight:400;text-transform:none">(pinned by contract test)</span></h3>
+          <div class="code">POST /v1/classify          → one verdict
+POST /v1/classify/batch    → ≤ 100 verdicts, sync
+POST /v1/summary/refresh   → customer summary
+GET  /v1/health · /v1/ready · /v1/capabilities
+GET  /metrics</div>
+          <div class="note">errors: RFC 9457 problem+json · only 503 = no tier answered</div>
+        </div>
+        <div class="box">
+          <h3>Admission <span class="muted" style="font-weight:400;text-transform:none">api/ · security/</span></h3>
+          <ul>
+            <li>X-API-Key → key record: scopes, max_tier, quota</li>
+            <li>per-key token-bucket rate limit → 429 + Retry-After</li>
+            <li>Idempotency-Key replay · 409 on a changed body</li>
+            <li>body-size cap · X-Request-ID echoed &amp; forwarded</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="box" style="margin-top:12px">
+        <h3>AnalysisService <span class="muted" style="font-weight:400;text-transform:none">pipeline/service.py — the only place text is prepared and results are derived</span></h3>
+        <div class="flow">
+          <span class="s">normalise</span><span class="a">▶</span>
+          <span class="s w">redact PII</span><span class="a">▶</span>
+          <span class="s">detect language</span><span class="a">▶</span>
+          <span class="s w">cache lookup — hit returns here</span><span class="a">▶</span>
+          <span class="s">Orchestrator climbs the ladder</span><span class="a">▶</span>
+          <span class="s">derive urgency · routing · requires_human · actionability · rating_consistency</span>
+        </div>
+        <div class="note">Tiers only ever see redacted text. Derived fields are deterministic rules on the winning verdict, never a model output.</div>
+      </div>
+
+      <div class="box" style="margin-top:12px">
+        <h3>Escalation ladder <span class="muted" style="font-weight:400;text-transform:none">pipeline/orchestrator.py + policy.py + tiers/ — cheapest first, climb only when not confident</span></h3>
+        <div class="ladder">
+          <div class="rung"><div class="t">T0 · rules</div>lexicons · regex · emoji · explicit rating<div class="muted">&lt; 1 ms · free</div></div>
+          <div class="step">▶</div>
+          <div class="rung"><div class="t">T1 · classifier</div>zero-shot NLI (ONNX) + lexicon ensemble<div class="muted">80–200 ms · free</div></div>
+          <div class="step">▶</div>
+          <div class="rung llm"><div class="t">T2 · local LLM</div>gateway class <b>local</b> · schema-constrained · adds tone/topics/intent<div class="muted">0.2–2 s · own hardware</div></div>
+          <div class="step">▶</div>
+          <div class="rung llm"><div class="t">T3 · cloud LLM</div>gateway class <b>auto</b>; below 0.65 confidence, arbiter class <b>cloud</b><div class="muted">0.8–3 s · billed</div></div>
+        </div>
+        <div class="note" style="margin-top:8px">EscalationPolicy, checked in this fixed order at every rung:</div>
+        <div class="order">
+          <span class="hard">1 tier ceiling</span><span class="hard">2 latency budget</span><span class="hard">3 cost budget</span>
+          <span>4 confidence floor</span><span>5 margin floor</span><span>6 complexity triggers</span><span>7 tier disagreement</span><span>8 unsupported language</span>
+          <span>9 next tier available?</span>
+        </div>
+      </div>
+
+      <div class="grid3" style="margin-top:12px">
+        <div class="box">
+          <h3>Resilience</h3>
+          Per LLM rung: timeout · circuit breaker · bulkhead. A failed rung becomes a failed trace step, never an exception.
+        </div>
+        <div class="box">
+          <h3>Summary refresh</h3>
+          Classifies new items via the ladder, merges a deterministic rollup, rewrites the narrative with one guarded gateway call. Stores nothing.
+        </div>
+        <div class="box">
+          <h3>Observability</h3>
+          structlog JSON · Prometheus <b>air_classifier_*</b> · optional OpenTelemetry spans per tier and gateway call.
+        </div>
+      </div>
+    </div>
+
+    <div class="arrows"><span>⟷</span><span>⟷</span><span>⟷</span></div>
+
+    <!-- dependencies -->
+    <div class="col">
+      <div class="box ext heavy">
+        <h3>air-model-gateway <i class="tag ext">EXT</i></h3>
+        <div class="muted">every model call · <b>POST /v1/generate</b> · :8083</div>
+        <ul style="margin-top:6px">
+          <li>this service asks for a <b>class</b>: local · auto · cloud — never a model or vendor</li>
+          <li>gateway owns provider keys, routing &amp; failover, cost, caching</li>
+          <li>daily budget for this service (429 budget_exceeded)</li>
+        </ul>
+      </div>
+      <div class="box ext">
+        <h3>Redis <i class="tag ext">EXT</i> <span class="muted" style="font-weight:400">via air-infra</span></h3>
+        <div class="muted">shared verdict cache across replicas · optional — falls back to an in-process cache</div>
+      </div>
+      <div class="box ext">
+        <h3>Prometheus / Grafana <i class="tag ext">EXT</i></h3>
+        <div class="muted">scrapes /metrics · owned by air-infra</div>
+      </div>
+      <div class="box ext">
+        <h3>MongoDB <i class="tag ext">EXT</i> <span class="muted" style="font-weight:400">optional</span></h3>
+        <div class="muted">audit log of jobs (redacted text + verdict, TTL) · off by default</div>
+      </div>
+      <div class="box">
+        <h3>Tier-1 ONNX artifact</h3>
+        <div class="muted">exported by scripts/export_zeroshot_model.py · mounted at /opt/models or baked in · absent → lexicon fallback</div>
+      </div>
+      <div class="box warm">
+        <h3>All optional</h3>
+        A bare checkout with nothing configured still boots and serves on T0 + T1. A missing dependency degrades the answer, it never fails it.
+      </div>
+    </div>
+  </div>
+</div>
+
+<hr class="rule">
+
+<!-- ================= LADDER BEHAVIOUR ================= -->
+<h2>Design principles — why it is built this way</h2>
+<div class="grid3">
+  <div class="box">
+    <h3 class="warmtxt">01 · Pay only for the difficulty you have</h3>
+    Most real text ("Great product, thanks!") is trivially classifiable; a cloud LLM costs orders of magnitude more than it needs to. Every request enters at T0 and climbs only when the rung below isn't confident — so the bill follows the hard cases, not the volume.
+  </div>
+  <div class="box">
+    <h3 class="warmtxt">02 · Degrade, never error</h3>
+    A timeout, breaker trip or gateway outage turns that rung into a failed trace step; the best lower-tier verdict is returned with <b>degraded: true</b>. The only 503 is "no tier produced anything". Readiness stays 200 while T0/T1 can answer.
+  </div>
+  <div class="box">
+    <h3 class="warmtxt">03 · Every decision is explainable</h3>
+    escalation_trace lists each rung's label, confidence, latency and the reason it climbed. EscalationReason is a closed set — it is also a Prometheus label, so dashboards show why traffic escalates.
+  </div>
+  <div class="box">
+    <h3 class="warmtxt">04 · Thresholds are config, not code</h3>
+    Confidence floors, margins, latency and cost budgets are all <b>AIR_CLASSIFIER__*</b> settings. Retuning the cost/accuracy trade never needs a logic deploy. Per request: min_tier · max_tier · max_cost_usd (default $0.05).
+  </div>
+  <div class="box">
+    <h3 class="warmtxt">05 · One model gateway, no vendor code</h3>
+    No provider SDKs or keys in this repo. Vendor choice, failover and spend caps live in air-model-gateway's routing config, per class, with an override for this service. Swapping a model is a gateway change, not a release here.
+  </div>
+  <div class="box">
+    <h3 class="warmtxt">06 · Privacy before anything persists</h3>
+    PII is redacted before the cache key, before any tier and before any log line. Raw text is never logged in production (startup refuses it). The service is stateless; summaries are stored by the caller.
+  </div>
+</div>
+
+<div class="grid2" style="margin-top:12px">
+  <!-- gateway contract -->
+  <div class="box">
+    <h3>Model access — class per caller</h3>
+    <table>
+      <tr><th>Caller</th><th>Class</th><th>Routing for this service (gateway override)</th></tr>
+      <tr><td>Tier 2</td><td><b>local</b></td><td>single local rung, no fallback — an outage fails fast and this ladder escalates</td></tr>
+      <tr><td>Tier 3</td><td><b>auto</b></td><td>cheap cloud models with cross-vendor failover</td></tr>
+      <tr><td>T3 arbiter</td><td><b>cloud</b></td><td>strongest models, only when T3 confidence &lt; 0.65</td></tr>
+      <tr><td>Summary</td><td><b>local</b></td><td>failure keeps the previous narrative, degraded: true</td></tr>
+    </table>
+    <div class="note">Concrete models per class: gateway <b>GET /v1/capabilities</b>. Request body is closed (extra="forbid"): an unknown field is a 422 on every call.</div>
+  </div>
+  <div class="box">
+    <h3>Gateway response → ladder behaviour</h3>
+    <table>
+      <tr><th>Gateway says</th><th>Ladder does</th></tr>
+      <tr><td>5xx · timeout · unreachable</td><td>capacity gap → climb on, or degrade</td></tr>
+      <tr><td>429 rate_limited</td><td>rung fails, ladder continues</td></tr>
+      <tr><td>429 budget_exceeded</td><td>rung fails until 00:00 UTC (daily budget spent)</td></tr>
+      <tr><td>other 4xx</td><td>rung recorded <b>failed</b>, error log — a config/contract bug here</td></tr>
+      <tr><td>refusal · bad JSON</td><td>one repair retry for schema errors, then fail</td></tr>
+    </table>
+    <div class="note">The gateway retries its own chain once; this service does not retry on top.</div>
+  </div>
+</div>
+
+<!-- ================= RESPONSE CONTRACT ================= -->
+<h2>Response contract</h2>
+<div class="grid3">
+  <div class="box">
+    <h3>Always present</h3>
+    <div class="code">sentiment        label · polarity · confidence
+urgency          derived
+routing          queue · priority (derived)
+requires_human   derived
+actionability    derived
+decided_by       t0_rules … t3_cloud_llm
+degraded         true if it wanted to climb
+escalation_trace one step per rung tried
+usage            tiers · tokens · est_cost_usd</div>
+  </div>
+  <div class="box">
+    <h3>Only when the ladder reaches T2/T3</h3>
+    <div class="code">tone     label · confidence
+topics   [label · confidence]
+intent   label · confidence</div>
+    <div class="note">Need real language understanding, so T0/T1 never guess them. Callers that always need them send options.min_tier = t2_local_llm.</div>
+    <h3 style="margin-top:10px">When the caller supplies context</h3>
+    <div class="code">rating_consistency   with rating
+aspects              per-aspect polarity</div>
+  </div>
+  <div class="box">
+    <h3>Vocabulary &amp; compatibility</h3>
+    <ul>
+      <li>All labels are enums in <b>constants.py</b>: Label, Tone, Topic, Intent, Urgency, RoutingPriority, Actionability, RatingAgreement</li>
+      <li>Adding a member is safe; removing or re-meaning one is breaking and bumps <b>CACHE_SCHEMA_VERSION</b></li>
+      <li><b>docs/openapi.json</b> is committed; air-client generates from it; a contract test fails on drift</li>
+      <li>External names kept on purpose: env prefix <b>AIR_CLASSIFIER__</b>, metric prefix <b>air_classifier_</b></li>
+    </ul>
+  </div>
+</div>
+
+<!-- ================= DEPLOYMENT ================= -->
+<h2>Deployment &amp; operations</h2>
+<div class="grid3">
+  <div class="box">
+    <h3>Image</h3>
+    <ul>
+      <li>python:3.12-slim · multi-stage · non-root user <b>air</b> (uid 1001)</li>
+      <li>container port <b>8080</b> (local host port 8082)</li>
+      <li>one uvicorn worker per container — scale with replicas</li>
+      <li>built-in HEALTHCHECK on /v1/health</li>
+      <li>12-factor: every setting is an <b>AIR_CLASSIFIER__…</b> env var</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3>Probes &amp; run modes</h3>
+    <ul>
+      <li><b>liveness</b> → /v1/health (process only)</li>
+      <li><b>readiness</b> → /v1/ready: ok / degraded = 200; 503 only when no tier can answer — never pull a pod for a degraded state</li>
+      <li><b>make run</b> — native dev loop on :8082</li>
+      <li><b>make up</b> — container on air-infra's air-net + Redis</li>
+      <li><b>make up INFRA=none</b> — standalone, in-process cache</li>
+      <li><b>make doctor</b> — checks every dependency</li>
+    </ul>
+  </div>
+  <div class="box warm">
+    <h3>Production checklist <i class="tag prod">+PROD</i></h3>
+    <ul>
+      <li>APP__ENV=production (refuses unauthenticated mode and raw-text logging)</li>
+      <li>real SECURITY__HASH_SALT + key hashes — the dev salt is not auto-rejected</li>
+      <li>MODEL_GATEWAY__TOKEN + base URL; policy &amp; routing entries in the gateway repo</li>
+      <li>CACHE__BACKEND=redis when running &gt; 1 replica</li>
+      <li>Tier-1 ONNX artifact mounted or baked in</li>
+      <li>/metrics restricted to Prometheus · JSON logs · OTel on</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ================= CHANGES ================= -->
+<h2>What changed since Rev B</h2>
+<div class="grid2" style="grid-template-columns: 1.7fr 1fr">
+  <div class="box">
+    <table class="changes">
+      <tr><th>Area</th><th>Rev B (plan)</th><th>Rev C (as built)</th></tr>
+      <tr><td>Model access</td><td>earlier model-service client, batch pool only</td><td>air-model-gateway /v1/generate, by model class, for T2/T3 and summaries</td></tr>
+      <tr><td>Classification core</td><td>trained head per attribute, calibrate, map</td><td>four-tier escalation ladder with an explainable trace</td></tr>
+      <tr><td>Label contract</td><td>/v1/taxonomy endpoint, spec/taxonomy</td><td>enums in constants.py, published via docs/openapi.json</td></tr>
+      <tr><td>Batch</td><td>async jobs, polling, object store</td><td>synchronous /v1/classify/batch, ≤ 100 items</td></tr>
+      <tr><td>State</td><td>Postgres: jobs, keys, usage, feedback</td><td>stateless; keys from env/file; optional Mongo audit</td></tr>
+      <tr><td>Capacity</td><td>interactive + batch pools, priority</td><td>one pool; per-key rate limit and max_tier</td></tr>
+      <tr><td>Source of truth</td><td>spec/ generates code</td><td>code-first; OpenAPI generated and contract-tested</td></tr>
+      <tr><td>New</td><td>—</td><td>/v1/summary/refresh; /v1/capabilities; health/ready under /v1</td></tr>
+      <tr><td>Name</td><td>air-classifier</td><td>air-classifier-service</td></tr>
+    </table>
+  </div>
+  <div class="box warm">
+    <h3>Open items for the team</h3>
+    <ul>
+      <li>No CI workflow or Kubernetes manifests in the repo yet — <b>make check</b> is the intended CI gate</li>
+      <li>5 golden-set T1 cases fail on the lexicon fallback; re-check with the ONNX artifact</li>
+      <li>5 older files need one <b>make fmt</b> commit</li>
+      <li>No automated check that the gateway's routing override for this service is still in place</li>
+      <li>Production guard should also reject the dev hash salt</li>
+      <li>X-Remaining-Budget-Ms is sent but not yet read by the gateway</li>
+    </ul>
+    <div class="note" style="color:#8a4a17">Details: README.md · docs/01-hld.md · docs/02-lld.md (§12 changelog) · CLAUDE.md</div>
+  </div>
+</div>
+
+</body>
+</html>
