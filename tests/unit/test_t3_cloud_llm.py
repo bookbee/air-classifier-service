@@ -7,7 +7,7 @@ refusal, an outage, or a model that cannot follow the schema must all leave this
 tier as a ``TierError`` so the ladder falls back to a cheaper rung.
 
 This rung talks to a single scripted provider now, not a registry choosing among
-several — cross-vendor failover moved to air-llm's own routing alias. What is
+several — cross-vendor failover is air-model-gateway's, behind a model class. What is
 still this rung's own behaviour, and what these tests pin, is *whether* to ask
 for a second opinion, never *who* answers the first one.
 """
@@ -18,15 +18,22 @@ import time
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, SecretStr, ValidationError
 
-from air_classifier_service.config import AirLlmSettings, AppSettings, ResilienceSettings, Settings
-from air_classifier_service.constants import Label, Provider
+from air_classifier_service.config import (
+    AppSettings,
+    ModelGatewaySettings,
+    ResilienceSettings,
+    Settings,
+)
+from air_classifier_service.constants import Label, ModelClass, Provider
 from air_classifier_service.pipeline.features import extract_features
 from air_classifier_service.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
 from air_classifier_service.pipeline.tiers.t3_cloud_llm import CloudLLMTier
 from air_classifier_service.providers.base import (
+    ProviderBudgetExceededError,
     ProviderRefusalError,
+    ProviderRequestError,
     ProviderResult,
     ProviderSchemaError,
     ProviderUnavailableError,
@@ -37,6 +44,10 @@ from air_classifier_service.schemas.common import LanguageInfo, Options, SafetyR
 from air_classifier_service.schemas.verdict import LLMSentimentOutput
 
 TEXT = "Great battery but the camera is awful."
+#: What each call asks the gateway for (the configured classes)...
+PRIMARY = ModelClass.AUTO
+ARBITER = ModelClass.CLOUD
+#: ...and the concrete models that answer them, as the gateway reports back.
 HAIKU = "claude-haiku-4-5"
 SONNET = "claude-sonnet-5"
 
@@ -70,10 +81,11 @@ class _ScriptedProvider:
         system_prompt: str,
         user_content: str,
         output_model: type[BaseModel],
-        model: str,
+        model: ModelClass,
         max_tokens: int,
         cache_prefix: bool = True,
         remaining_ms: float | None = None,
+        request_id: str | None = None,
     ) -> ProviderResult:
         self.calls.append(
             {
@@ -84,6 +96,7 @@ class _ScriptedProvider:
                 "max_tokens": max_tokens,
                 "cache_prefix": cache_prefix,
                 "remaining_ms": remaining_ms,
+                "request_id": request_id,
             }
         )
         if not self._outcomes:
@@ -97,7 +110,7 @@ class _ScriptedProvider:
         return None
 
     @property
-    def models_called(self) -> list[str]:
+    def models_called(self) -> list[ModelClass]:
         return [call["model"] for call in self.calls]
 
 
@@ -127,16 +140,16 @@ def _result(
     )
 
 
-def _settings(**air_llm: Any) -> Settings:
+def _settings(**model_gateway: Any) -> Settings:
     fields: dict[str, Any] = {
         "token": SecretStr("test-token"),
-        "cloud_model": HAIKU,
-        "arbiter_model": SONNET,
+        "cloud_model": PRIMARY,
+        "arbiter_model": ARBITER,
     }
-    fields.update(air_llm)
+    fields.update(model_gateway)
     return Settings(
         app=AppSettings(env="test"),
-        air_llm=AirLlmSettings(**fields),
+        model_gateway=ModelGatewaySettings(**fields),
     )
 
 
@@ -166,9 +179,9 @@ def _tier(
     breaker: CircuitBreaker | None = None,
     bulkhead: Bulkhead | None = None,
     healthy: bool = True,
-    **air_llm: Any,
+    **model_gateway: Any,
 ) -> tuple[CloudLLMTier, _ScriptedProvider]:
-    settings = _settings(**air_llm)
+    settings = _settings(**model_gateway)
     provider = _ScriptedProvider(outcomes, healthy=healthy)
     tier = CloudLLMTier(
         settings,
@@ -191,7 +204,7 @@ async def test_confident_primary_answer_becomes_the_verdict() -> None:
     assert verdict.result.label is Label.NEGATIVE
     assert verdict.result.confidence == pytest.approx(0.91)
     assert verdict.model_version == f"anthropic:{HAIKU}"
-    assert provider.models_called == [HAIKU]
+    assert provider.models_called == [PRIMARY]
 
 
 async def test_the_cached_prefix_and_the_schema_are_both_requested() -> None:
@@ -239,7 +252,7 @@ async def test_every_language_is_supported_here() -> None:
     tier, _ = _tier([])
 
     assert tier.supports_language("ja") is True
-    assert tier.model_version == HAIKU
+    assert tier.model_version == PRIMARY
 
 
 # ── Arbitration ───────────────────────────────────────────────────────────────
@@ -255,7 +268,7 @@ async def test_low_confidence_escalates_to_the_arbiter() -> None:
 
     verdict = await tier.analyse(_ctx())
 
-    assert provider.models_called == [HAIKU, SONNET]
+    assert provider.models_called == [PRIMARY, ARBITER]
     assert verdict.result.label is Label.MIXED
     assert verdict.result.confidence == pytest.approx(0.88)
     assert verdict.model_version == f"anthropic:{SONNET}"
@@ -279,7 +292,7 @@ async def test_confidence_at_the_floor_does_not_arbitrate() -> None:
 
     verdict = await tier.analyse(_ctx())
 
-    assert provider.models_called == [HAIKU]
+    assert provider.models_called == [PRIMARY]
     assert verdict.model_version == f"anthropic:{HAIKU}"
 
 
@@ -288,7 +301,7 @@ async def test_confidence_above_the_floor_does_not_arbitrate() -> None:
 
     await tier.analyse(_ctx())
 
-    assert provider.models_called == [HAIKU]
+    assert provider.models_called == [PRIMARY]
 
 
 async def test_arbitration_happens_at_most_once() -> None:
@@ -303,7 +316,7 @@ async def test_arbitration_happens_at_most_once() -> None:
 
     verdict = await tier.analyse(_ctx())
 
-    assert provider.models_called == [HAIKU, SONNET]
+    assert provider.models_called == [PRIMARY, ARBITER]
     assert verdict.result.confidence == pytest.approx(0.21)
 
 
@@ -312,7 +325,7 @@ async def test_arbitration_can_be_switched_off() -> None:
 
     verdict = await tier.analyse(_ctx())
 
-    assert provider.models_called == [HAIKU]
+    assert provider.models_called == [PRIMARY]
     assert verdict.result.confidence == pytest.approx(0.10)
 
 
@@ -351,7 +364,7 @@ async def test_a_failed_second_opinion_keeps_the_first() -> None:
 
     verdict = await tier.analyse(_ctx())
 
-    assert provider.models_called == [HAIKU, SONNET]
+    assert provider.models_called == [PRIMARY, ARBITER]
     assert verdict.succeeded is True
     assert verdict.result.confidence == pytest.approx(0.30)
     assert verdict.model_version == f"anthropic:{HAIKU}"
@@ -364,7 +377,7 @@ async def test_arbitration_is_skipped_once_the_cost_ceiling_is_spent() -> None:
 
     verdict = await tier.analyse(_ctx(options=Options(max_cost_usd=0.005), cost_spent_usd=0.002))
 
-    assert provider.models_called == [HAIKU]
+    assert provider.models_called == [PRIMARY]
     assert verdict.result.confidence == pytest.approx(0.30)
 
 
@@ -375,7 +388,7 @@ async def test_arbitration_proceeds_while_budget_remains() -> None:
 
     await tier.analyse(_ctx(options=Options(max_cost_usd=0.05)))
 
-    assert provider.models_called == [HAIKU, SONNET]
+    assert provider.models_called == [PRIMARY, ARBITER]
 
 
 # ── Schema repair ─────────────────────────────────────────────────────────────
@@ -386,7 +399,7 @@ async def test_one_repair_retry_is_attempted_after_a_bad_parse() -> None:
 
     verdict = await tier.analyse(_ctx())
 
-    assert provider.models_called == [HAIKU, HAIKU]
+    assert provider.models_called == [PRIMARY, PRIMARY]
     assert "Correction required" in provider.calls[1]["user_content"]
     assert verdict.succeeded is True
 
@@ -436,6 +449,34 @@ async def test_a_transport_failure_degrades_the_ladder() -> None:
         await tier.analyse(_ctx())
 
 
+async def test_every_call_forwards_the_request_id() -> None:
+    tier, provider = _tier([_result(confidence=0.30), _result(confidence=0.9, model=SONNET)])
+
+    await tier.analyse(_ctx())
+
+    assert [call["request_id"] for call in provider.calls] == ["req_t3", "req_t3"]
+
+
+async def test_a_spent_daily_budget_fails_the_rung_and_says_so() -> None:
+    """A spent budget stops Tier 3 until the next UTC day; the failed rung's
+    error has to name that, or the trace reads like an ordinary outage."""
+    tier, _ = _tier([ProviderBudgetExceededError("daily budget spent", retry_after_s=3600)])
+
+    with pytest.raises(TierError, match="ProviderBudgetExceededError"):
+        await tier.analyse(_ctx())
+
+
+async def test_a_rejected_request_fails_the_rung_rather_than_reading_as_unavailable() -> None:
+    """`TierUnavailableError` is the capacity-gap signal (`degraded: true`, no
+    error). A 4xx from the gateway is a contract bug, so it must be a failure."""
+    tier, _ = _tier([ProviderRequestError("bad field", status=422, code="validation_error")])
+
+    with pytest.raises(TierError) as excinfo:
+        await tier.analyse(_ctx())
+    assert not isinstance(excinfo.value, TierUnavailableError)
+    assert "ProviderRequestError" in str(excinfo.value)
+
+
 async def test_an_exhausted_budget_never_reaches_the_provider() -> None:
     tier, provider = _tier([_result(confidence=0.9)])
 
@@ -465,7 +506,7 @@ async def test_the_default_bulkhead_is_self_built_and_actually_bounds_concurrenc
     """
     settings = Settings(
         app=AppSettings(env="test"),
-        air_llm=AirLlmSettings(token=SecretStr("test-token")),
+        model_gateway=ModelGatewaySettings(token=SecretStr("test-token")),
         resilience=ResilienceSettings(llm_concurrency=1, bulkhead_acquire_timeout_s=0.02),
     )
     provider = _ScriptedProvider([_result(confidence=0.9)])
@@ -480,17 +521,17 @@ async def test_the_default_bulkhead_is_self_built_and_actually_bounds_concurrenc
 # ── What /v1/capabilities advertises for this rung ────────────────────────────
 
 
-def test_capabilities_report_the_configured_cloud_model() -> None:
-    """`model_version` is just the configured alias/model now — no provider
-    preference order to resolve, since air-llm owns that choice."""
+def test_capabilities_report_the_configured_model_class() -> None:
+    """`model_version` is the configured class; which concrete model serves it
+    is the gateway's routing, reported per answer, not advertised up front."""
     tier, _ = _tier([])
 
-    assert tier.model_version == HAIKU
+    assert tier.model_version == PRIMARY
 
 
-def test_capabilities_reflect_a_routing_alias_when_one_is_configured() -> None:
-    """The configured value may be an air-llm alias, not a bare model id — this
-    rung reports it verbatim either way."""
-    tier, _ = _tier([], cloud_model="classify-default")
-
-    assert tier.model_version == "classify-default"
+@pytest.mark.parametrize("retired", ["classify-default", "claude-haiku-4-5", "anthropic:x"])
+def test_a_retired_alias_or_model_name_is_a_startup_error(retired: str) -> None:
+    """The gateway answers these with 422 on every call; caught here instead,
+    at config load, where it can't masquerade as a degraded ladder."""
+    with pytest.raises(ValidationError):
+        ModelGatewaySettings(cloud_model=retired)  # type: ignore[arg-type]

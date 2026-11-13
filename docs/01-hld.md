@@ -17,21 +17,22 @@
             │ in-proc            │ HTTPS + X-API-Key
             │ cache (optional)   ▼
             ▼             ┌──────────────────┐
-         Redis*           │      air-llm      │
-                          │ (its own service) │
+         Redis*           │ air-model-gateway│
+                          │ (its own service)│
                           └──────────────────┘
 
    * optional; in-process cache is the default
 ```
 
 The service owns no database, and no model is reached directly — every model call, Tier 2
-and Tier 3 both, goes through air-llm, the platform's own model gateway (a separate,
-independently-deployed service; see its own README for what it owns and how). air-llm is
-the enabler that makes a more accurate, more expensive answer reachable at all; *which*
-model or vendor actually executes a call, and at what price, is entirely its decision —
-opaque from here, and deliberately so (§4's API surface, §9). Everything else this service
-needs to answer a request arrives in the request, is loaded at boot (the Tier-1 model
-artifact, lexicons, config), or is fetched from air-llm.
+and Tier 3 both, goes through air-model-gateway, the platform's own model gateway (a
+separate, independently-deployed service; see its own README for what it owns and how), on
+its `POST /v1/generate`. The gateway is the enabler that makes a more accurate, more
+expensive answer reachable at all; *which* model or vendor actually executes a call, and at
+what price, is entirely its decision — this service asks only for a model class — opaque
+from here, and deliberately so (§4's API surface, §9). Everything else this service needs to
+answer a request arrives in the request, is loaded at boot (the Tier-1 model artifact,
+lexicons, config), or is fetched from the gateway.
 
 ## 2. Architectural principles
 
@@ -56,8 +57,8 @@ artifact, lexicons, config), or is fetched from air-llm.
 | --- | --- | --- | --- | --- | --- |
 | **T0** | Rules & shortcuts | Pure Python, lexicons, regex | < 1 ms | ~0 | Cache hits, empty/near-empty text, explicit rating metadata, emoji-only, blocklist |
 | **T1** | Statistical classifier | ONNX quantised transformer + VADER-style lexicon ensemble | 5–25 ms | ~0 | Clear polarity, conventional phrasing, single-aspect |
-| **T2** | Local LLM | air-llm → a local model, JSON-schema constrained (which one is air-llm's config) | 200 ms – 2 s | ~0 (own hardware) | Mixed sentiment, mild sarcasm, aspect extraction, domain phrasing |
-| **T3** | Cloud LLM | air-llm → a cheap model, then arbitration to a stronger one (vendor is air-llm's routing choice) | 0.8 – 3 s | $ per call | Genuine ambiguity, subtle sarcasm/irony, multilingual edge cases, high-stakes routing |
+| **T2** | Local LLM | air-model-gateway `local` class → a local model, JSON-schema constrained (which one is the gateway's routing) | 200 ms – 2 s | ~0 (own hardware) | Mixed sentiment, mild sarcasm, aspect extraction, domain phrasing |
+| **T3** | Cloud LLM | air-model-gateway `auto` class → a cheap model, then arbitration via `cloud` to a stronger one (vendor is the gateway's routing choice) | 0.8 – 3 s | $ per call | Genuine ambiguity, subtle sarcasm/irony, multilingual edge cases, high-stakes routing |
 
 ### Why this ordering
 
@@ -72,8 +73,8 @@ for anything T1 flagged as ambiguous, and it keeps data on our own hardware.
 
 T3 is the arbiter of last resort, and internally has two rungs of its own: a cheap default
 model handles the bulk, and a stronger one is invoked only when the default itself reports
-low confidence or when the caller demands maximum accuracy. Both are air-llm routing
-aliases (§9) — which vendor answers either one is not a decision this service makes.
+low confidence or when the caller demands maximum accuracy. Both are gateway model classes
+(§9) — which vendor answers either one is not a decision this service makes.
 
 ### Escalation signals
 
@@ -200,8 +201,8 @@ field in the envelope above is always present, regardless of which tier decided.
 └───────────────────────────┬────────────────────────────────┘
                             ▼
 ┌──────────────── Provider & infrastructure ─────────────────┐
-│ AirLlmProvider — one adapter, one call: POST /v1/inference │
-│ on air-llm. Vendor routing/failover/cost/cache are its job │
+│ ModelGatewayProvider — one adapter, one call: POST         │
+│ /v1/generate. Routing/failover/cost/budget/cache: gateway's│
 │ Cache · Resilience (breaker/timeout/bulkhead)               │
 │ Observability (logs · metrics · traces)                    │
 └────────────────────────────────────────────────────────────┘
@@ -237,7 +238,7 @@ ladder can be exercised with four fake tiers and no network.
 - `/v1/health` and `/v1/ready` are the two deliberate exceptions to "everything needs a
   key": a kubelet or load balancer probing them carries no credential, and a liveness
   check that 401s looks identical to a dead process from outside. `/v1/capabilities`
-  is not exempted the same way — it discloses configured model/alias names and which
+  is not exempted the same way — it discloses configured model classes and which
   Tier-1 backend actually loaded, which is operator detail rather than a boolean a
   probe needs, so it carries the same `X-API-Key` requirement `/v1/classify` does.
 - Per-key scopes (`classify:read`, `admin:read`) and a per-key `max_tier` ceiling, so a
@@ -253,10 +254,10 @@ ladder can be exercised with four fake tiers and no network.
 | Mechanism | Applied to | Behaviour |
 | --- | --- | --- |
 | Timeout | Every tier | Per-tier budget; expiry counts as tier failure |
-| Retry | air-llm calls only | Jittered exponential backoff on 429/5xx/connection errors |
-| Circuit breaker | Each rung's air-llm call (T2, T3) | Opens after N consecutive failures, half-open probe after cooldown |
+| Retry | Model calls, inside air-model-gateway | The gateway retries a class's chain once, with jittered backoff, on transient failures; this service adds none — the ladder above is the retry, with a better model |
+| Circuit breaker | Each rung's gateway call (T2, T3) | Opens after N consecutive failures, half-open probe after cooldown |
 | Bulkhead | Local + cloud LLM calls | Bounded-concurrency semaphore with acquisition timeout |
-| Failover | Cloud tier | air-llm's own routing alias walks its cross-vendor chain first; if air-llm itself cannot serve, this service's breaker opens and the ladder degrades |
+| Failover | Cloud tier | The gateway walks the `auto`/`cloud` class's cross-vendor chain first; if it cannot serve, this service's breaker opens and the ladder degrades |
 | Degradation | Whole ladder | Best lower-tier verdict returned with `degraded: true` |
 
 ### Observability
@@ -268,14 +269,16 @@ ladder can be exercised with four fake tiers and no network.
 - **Metrics** — Prometheus (full catalogue in the LLD): request counters, tier-decision and
   escalation counters, per-tier latency histograms, token and cost counters, cache hit
   ratio, breaker state gauges.
-- **Cost** — air-llm reports the authoritative `cost_usd` for each call it serves; this
+- **Cost** — the gateway reports the authoritative `cost_usd` for each call it serves; this
   service holds no price table of its own, it folds that figure into a running per-request
-  spend, exported as both a counter and a response field.
+  spend, exported as both a counter and a response field. The gateway separately enforces a
+  daily budget for this service; a spent budget fails Tier 3 calls with `budget_exceeded`
+  until the next UTC day, recorded in the trace as a failed rung.
 - **Audit log (optional)** — a MongoDB-backed, TTL-expiring record of classification jobs
   (redacted text plus verdict) for support review, off by default. Written fire-and-forget
   behind a bounded queue, so a slow or unreachable Mongo degrades to dropped entries rather
-  than adding request latency — the same optional-dependency contract Redis and air-llm
-  already have with this service.
+  than adding request latency — the same optional-dependency contract Redis and
+  air-model-gateway already have with this service.
 
 ## 8. Deployment
 
@@ -288,46 +291,56 @@ ladder can be exercised with four fake tiers and no network.
   in-flight requests within a configurable window.
 - **Compose** — this service alone, joined to air-infra's `air-net` network for Redis, which
   is the only shared platform component it still reaches directly. Model access (Tier 2 and
-  Tier 3 both) is air-llm's — a separate, independently-deployed service on its own network,
-  reached over the host (`host.docker.internal`) rather than a shared compose network,
-  because air-llm is meant to be reachable the same way in every environment, local included.
+  Tier 3 both) is air-model-gateway's — a separate, independently-deployed service on its own
+  network, reached over the host (`host.docker.internal`) rather than a shared compose network,
+  because the gateway is meant to be reachable the same way in every environment, local
+  included. `make up INFRA=none` layers `docker-compose.standalone.yml` on top for a run
+  without air-infra: the project's own network and an in-process cache instead of `air-net`
+  and Redis. The default stays `external: true`, so a missing shared stack is still a loud
+  failure unless that opt-in is explicit.
 - **Config** — 12-factor via environment variables mapped through `pydantic-settings`;
   secrets injected, never baked into the image; `.env.example` documents every key.
 - **Probes** — `/v1/health` for liveness (process only), `/v1/ready` for readiness (probes
   each enabled tier; a cloud-tier outage marks the service *degraded*, not unready, because
   it can still serve from lower tiers).
 
-## 9. Working with air-llm
+## 9. Working with air-model-gateway
 
-This service does not choose which vendor answers a Tier-3 call — air-llm does, per its own
-`deploy/routing.yaml`. What stays this service's own decision is *which named model or
-routing alias* to ask for, and whether the answer that comes back is good enough:
+This service does not choose which vendor answers a call — the gateway does, from its own
+`deploy/routing.yaml`. What stays this service's own decision is *which model class* to ask
+for, and whether the answer that comes back is good enough. Classes are `local`, `auto` and
+`cloud` (`constants.ModelClass`); the gateway resolves each to an ordered chain, and
+`overrides.air-classifier-service` in its routing file tunes those chains for this service
+alone, so a change made for another consumer can't move this service's escalation behaviour.
 
-- `air_llm.local_model` — an air-llm routing alias owned by this service (default
-  `classify-local`), but deliberately a single-entry one with no failover of its own. A down
-  local daemon must fail this call cleanly so *this* service's own ladder escalates to Tier 3,
-  rather than air-llm silently substituting a cloud model under the Tier-2 label — cross-vendor
-  failover inside the alias would hide exactly the signal Tier 2's escalation depends on.
-- `air_llm.cloud_model` / `arbiter_model` — air-llm routing aliases, also owned by this
-  service (default `classify-default` and `classify-arbiter`), each already carrying its own
-  cross-vendor failover chain. Cross-vendor failover *is* wanted here — an outage on one cloud
-  vendor should not remove Tier 3 outright — and that is exactly what an alias is for.
+- `model_gateway.local_model` = `local` (Tier 2, and the summary narrative). In this
+  service's override, a single local rung with no fallback. A down local daemon must fail
+  this call cleanly so *this* service's own ladder escalates to Tier 3, rather than the
+  gateway silently substituting a cloud model under the Tier-2 label — failover inside the
+  class would hide exactly the signal Tier 2's escalation depends on. (A `pin` to one exact
+  `provider:model` would also avoid failover, but needs a gateway grant this service doesn't
+  have and doesn't need.)
+- `model_gateway.cloud_model` = `auto` and `arbiter_model` = `cloud` (Tier 3). In this
+  service's override, `auto` is cloud-only at the cheap end and `cloud` holds the strongest
+  models, each a cross-vendor chain. Cross-vendor failover *is* wanted here — an outage at
+  one cloud vendor should not remove Tier 3 outright.
 
-All three aliases are named and scoped to this service specifically, rather than pointed at
-air-llm's shared ones — a change another consumer makes to a shared alias must not silently
-change this service's escalation behaviour.
+The gateway's request body is closed (`extra="forbid"`): a field it doesn't declare is a 422
+on every call. This service treats any gateway 4xx other than 429 as a configuration or
+contract bug — logged at error level and recorded as a *failed* rung — rather than as
+unavailability, so a broken integration can't hide behind `degraded: true` fallbacks.
 
 Two constraints shape this service's own prompt design and are easy to get wrong regardless
 of who calls the provider API:
 
-1. **Structured output is produced by the provider, not by parsing.** Whichever provider an
-   alias currently resolves to binds the response to a JSON Schema derived from our Pydantic
+1. **Structured output is produced by the provider, not by parsing.** Whichever provider a
+   class currently resolves to binds the response to a JSON Schema derived from our Pydantic
    model, so there is no regex-scraping of prose and no retry-on-parse-failure loop.
 2. **Prompt caching has a minimum cacheable prefix, and it differs by provider and model.** A
-   terse classification prompt can silently fail to cache on whichever model an alias resolves
+   terse classification prompt can silently fail to cache on whichever model a class resolves
    to today. The system prompt, rubric, and few-shot block must therefore be sized
    deliberately, and cache-hit metrics must be asserted rather than assumed.
 
-Model IDs and prices are DevOps-owned config in air-llm's own repo
-(`deploy/routing.yaml`, `deploy/pricing.yaml`), not duplicated here — this service reports
-whatever `model.name` air-llm's response says actually answered, rather than assuming.
+Model IDs and prices are config in air-model-gateway's own repo (`deploy/routing.yaml`,
+`deploy/pricing.yaml`), not duplicated here — this service reports whichever `provider` and
+`model` the gateway's response says actually answered, rather than assuming.

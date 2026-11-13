@@ -7,7 +7,7 @@ off the wire rather than a model instance. The distinction matters: a response
 model can be correct while the route serialises it through the wrong
 envelope, returns a bare ``Response``, or drops a field.
 
-The deployment is deliberately two rungs deep — air-llm off — for two
+The deployment is deliberately two rungs deep — air-model-gateway off — for two
 reasons. It opens no sockets, so the suite is hermetic
 without mocking anything. And it makes the ladder *deterministic*: T0 and T1
 are pure functions of the input, so the trace below is the same on every
@@ -31,9 +31,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from air_classifier_service.config import (
-    AirLlmSettings,
     AppSettings,
     CacheSettings,
+    ModelGatewaySettings,
     SecuritySettings,
     Settings,
 )
@@ -96,7 +96,7 @@ def client() -> Iterator[TestClient]:
     """
     settings = Settings(
         app=AppSettings(env="test"),
-        air_llm=AirLlmSettings(enabled=False),
+        model_gateway=ModelGatewaySettings(enabled=False),
         cache=CacheSettings(backend="memory"),
         security=SecuritySettings(allow_unauthenticated=True),
     )

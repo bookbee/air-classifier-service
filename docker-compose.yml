@@ -4,13 +4,13 @@
 # are NOT started here. This file joins air-infra's `air-net` network and
 # addresses Redis by service name, so the whole platform still runs on one
 # laptop with each port bound exactly once (air-infra/README.md, port map).
-# Every model call — Tier 2 and Tier 3 both — goes to air-llm instead, which is
-# its own standalone service on its own network, reached over the host
+# Every model call — Tier 2 and Tier 3 both — goes to air-model-gateway instead,
+# which is its own standalone service on its own network, reached over the host
 # (`host.docker.internal`) exactly like a host-native Ollama used to be.
 #
-#   cd ../air-infra && make up        # once, before this — redis
-#   cd ../air-llm && make up          # once, before this — models
-#   make up                           # here
+#   cd ../air-infra && make up            # once, before this — redis
+#   cd ../air-model-gateway && make up    # once, before this — models
+#   make up                               # here
 #
 # In production none of this applies: DevOps supplies every endpoint below as an
 # environment variable against managed instances, and the compose file is not
@@ -65,18 +65,18 @@ services:
       # is what keeps that override from taking hold.
       AIR_CLASSIFIER__CLASSIFIER__MODEL_PATH: /opt/models/model.onnx
       AIR_CLASSIFIER__CLASSIFIER__TOKENIZER_PATH: /opt/models/tokenizer.json
-      # Tiers 2 and 3 both. air-llm publishes 8082+1=8083 on the host (its own
-      # README's port map) regardless of whether it is itself running natively
+      # Tiers 2 and 3 both. air-model-gateway publishes 8082+1=8083 on the host
+      # (its own README's port map) regardless of whether it is itself running natively
       # or in its own compose stack, so the container reaches it the same way
       # this repo's own native-Ollama support always worked: over the host.
-      AIR_CLASSIFIER__AIR_LLM__BASE_URL: http://host.docker.internal:8083
+      AIR_CLASSIFIER__MODEL_GATEWAY__BASE_URL: http://host.docker.internal:8083
       # air-infra's redis. Password-protected even locally, so the credentials
       # are part of the URL — an unauthenticated URL here fails closed and the
       # cache silently degrades to misses rather than erroring.
       AIR_CLASSIFIER__CACHE__BACKEND: redis
       AIR_CLASSIFIER__CACHE__REDIS_URL: redis://:localdevpass@redis:6379/0
-    # air-llm's service token arrives from an untracked .env; `environment:`
-    # wins over `env_file:`, so it is deliberately absent above.
+    # air-model-gateway's service token arrives from an untracked .env;
+    # `environment:` wins over `env_file:`, so it is deliberately absent above.
     env_file:
       - path: .env
         required: false

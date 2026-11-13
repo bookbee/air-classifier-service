@@ -46,12 +46,12 @@ climbed only when the rung below is not confident enough.
 
 | Decision | Choice | Rationale |
 | --- | --- | --- |
-| Model access | One `LLMProvider` protocol, one adapter — every call (local and cloud) routed through [air-llm](../../air-llm/README.md), the platform's model gateway | Multi-vendor routing/failover, cost accounting and caching are air-llm's job now, not this repo's; this service keeps only the escalation decision (LLD §6, and its changelog) |
+| Model access | One `LLMProvider` protocol, one adapter — every call (local and cloud) routed through [air-model-gateway](../../air-model-gateway/README.md), the platform's model gateway | Multi-vendor routing/failover, cost accounting, budgets and caching are the gateway's job, not this repo's; this service keeps only the escalation decision (LLD §6, and its changelog) |
 | Persistence | **Stateless + cache only** | No DB to operate, back up, or migrate. Cache serves dedup, idempotency, and cost control |
 | API shape | **Sync single + sync batch** | Bounded latency budget with hard per-tier timeouts makes sync viable; batch amortises overhead |
 | Language / runtime | Python 3.12, FastAPI, Pydantic v2 | Matches the Pydantic-first requirement; async-native |
-| Tier 2 (local) | Whichever model `air_llm.local_model`'s alias resolves to — this service's own decision is only the alias name, not the model | A local rung at near-zero marginal cost is the whole point of climbing past Tier 1 before paying for Tier 3; which runtime serves it is air-llm's config, swappable without a code change here |
-| Tier 3 (cloud) | A cheap model by default, arbitrating to a stronger one below a confidence floor — both air-llm's routing choice | The cost/latency shape (cheap-first, escalate-on-doubt) is this service's decision; which vendor embodies "cheap" or "strong" at any given time is not |
+| Tier 2 (local) | Whichever model the gateway's `local` class resolves to for this service — this service's own decision is only the class, not the model | A local rung at near-zero marginal cost is the whole point of climbing past Tier 1 before paying for Tier 3; which runtime serves it is the gateway's routing config, swappable without a code change here |
+| Tier 3 (cloud) | A cheap model by default (`auto`), arbitrating to a stronger one (`cloud`) below a confidence floor — which models those are is the gateway's routing choice | The cost/latency shape (cheap-first, escalate-on-doubt) is this service's decision; which vendor embodies "cheap" or "strong" at any given time is not |
 
 ### Resolved — approved 2026-08-08
 
@@ -134,7 +134,7 @@ OpenTelemetry traces, load test, runbook, `docs/api.md` finalised, image publish
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | Confidence scores are not comparable across tiers | Escalation policy misfires — over-escalating (cost) or under-escalating (accuracy) | Calibrate every tier onto a common 0–1 scale against a shared labelled set; treat thresholds as config, not code |
-| Cloud provider outage or rate limit | Requests fail at the top rung | air-llm's own routing alias fails over across vendors first; if air-llm itself cannot serve, this service's circuit breaker trips and degrades to the best lower-tier verdict with `degraded: true`. Never 5xx when a lower tier answered |
+| Cloud provider outage or rate limit | Requests fail at the top rung | The gateway's class chain fails over across vendors first; if the gateway itself cannot serve, this service's circuit breaker trips and degrades to the best lower-tier verdict with `degraded: true`. Never 5xx when a lower tier answered |
 | Prompt-cache minimum not met | Cloud cost stays high despite caching | Each provider behind a cloud alias has its own minimum cacheable prefix (currently 4096/1024 tokens for the two in play). Size the system prompt + rubric past the larger one deliberately, and assert cache hits in metrics |
 | Local LLM saturates CPU/GPU under load | Tier-2 latency spikes drag P99 | Bulkhead semaphore + queue timeout; shed to Tier 3 (or return Tier-1 verdict) rather than queue indefinitely |
 | Sensitive text sent to a third party | Compliance exposure | PII redaction before the cloud tier; `max_tier` cap enforceable per API key; opt-out per request |
@@ -157,7 +157,7 @@ Please confirm or push back on each before coding starts:
 - [ ] The single `/v1/classify` endpoint and its full field set (§HLD 4)
 - [ ] The response envelope, especially `escalation_trace` being on by default
 - [ ] Default thresholds in the escalation policy (§LLD 5)
-- [ ] A cheap-first, arbitrate-on-doubt cloud tier, with air-llm choosing the vendor
+- [ ] A cheap-first, arbitrate-on-doubt cloud tier, with air-model-gateway choosing the vendor
 - [ ] The three open questions in §4
 
 ## 9. Future extensions (not v1)
@@ -224,9 +224,9 @@ architecture from the T0–T3 ladder this service is built around — worth a de
 pass of its own rather than folding in as an amendment, since the two models (one verdict
 that escalates vs. several independent per-attribute heads) don't obviously compose.
 
-**air-llm's role narrows in that vision** to batch-pool zero-shot labelling and new-taxonomy
-bootstrapping only, never the interactive path — a different relationship than today's, where
-air-llm serves Tiers 2 and 3 on the one synchronous path that exists.
+**air-model-gateway's role narrows in that vision** to batch-pool zero-shot labelling and
+new-taxonomy bootstrapping only, never the interactive path — a different relationship than
+today's, where the gateway serves Tiers 2 and 3 on the one synchronous path that exists.
 
 **Operational principles worth carrying forward regardless of which (if any) of the above
 gets built** — several are already true of this service today, noted where so: per-language

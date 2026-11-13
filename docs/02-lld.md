@@ -61,7 +61,7 @@ air-classifier-service/
     │
     ├── providers/
     │   ├── base.py                # LLMProvider protocol, ProviderResult
-    │   ├── air_llm_provider.py    # the one adapter: POST /v1/inference on air-llm
+    │   ├── model_gateway_provider.py  # the one adapter: POST /v1/generate on air-model-gateway
     │   └── prompts/                # system.md, system_compact.md, system_summary.md, loader.py,
     │                               # summary_loader.py
     │
@@ -97,8 +97,9 @@ air-classifier-service/
         └── quotas.py               # token bucket rate limiter
 ```
 
-**Tests** mirror the source tree under `tests/`, split into `unit/`, `integration/` (needs
-Redis and a reachable air-llm), and `contract/` (OpenAPI snapshot + golden response fixtures).
+**Tests** mirror the source tree under `tests/`, split into `unit/`, `integration/` (real
+components wired together, the gateway mocked at the HTTP layer; no external services),
+`contract/` (OpenAPI snapshot + golden response fixtures) and `eval/` (the golden set).
 
 ## 2. Core enums and protocols
 
@@ -187,7 +188,7 @@ class ProviderResult(BaseModel):
 
 A single `LLMProvider` protocol covers both the local and the cloud tiers. The local tier is
 not a special case — it is a model that happens to be free and nearby, with which concrete
-model that even is left entirely to air-llm's own routing — which means Tier 2 and Tier 3
+model that even is left entirely to air-model-gateway's routing — which means Tier 2 and Tier 3
 share their prompt-building and validation code entirely (though not their system prompt —
 §6).
 
@@ -540,28 +541,31 @@ dynamic quantization measurably destroys its ability to discriminate between hyp
 `scripts/export_zeroshot_model.py` is pinned to a corrected configuration
 (`per_channel=True`); see the §12 changelog for the measurement.
 
-### T2 — Local LLM (via air-llm)
+### T2 — Local LLM (via air-model-gateway)
 
 Prompt = a compact system prefix (not the cloud tier's — see below) + one task framing +
 the caller's optional fields + the input. Requests the JSON schema derived from
-`LLMSentimentOutput`, with `format` constrained so the model cannot emit prose.
-`temperature: 0`, deterministic seed. One retry on schema-validation failure with a repair
-instruction appended; a second failure marks the tier failed and escalates.
+`LLMSentimentOutput` as `json_schema`, which the gateway binds to the answering provider's
+structured-output mechanism so the model cannot emit prose. Sampling parameters are left to
+the gateway's defaults: the adapter sends no `temperature`, and the gateway's body has no
+seed field. One retry on schema-validation failure with a repair instruction appended; a
+second failure marks the tier failed and escalates.
 
-The call itself is one `AirLlmProvider.classify()`, targeting `air_llm.local_model` — an
-air-llm routing alias owned by this service (`classify-local`, by default), but deliberately
-a single-entry one with no failover of its own, so a down local daemon fails this one call
-cleanly and the ladder escalates to Tier 3, rather than air-llm quietly substituting a
-cloud model under the Tier-2 label. The verdict reports `f"{result.provider.value}:
-{result.model}"` — the resolved backend, not the alias name — the same shape Tier 3 uses,
-so a caller can always see who actually answered regardless of which rung decided.
+The call itself is one `ModelGatewayProvider.classify()` asking for the
+`model_gateway.local_model` class (`local`, by default). The gateway's override for this
+service makes `local` a single local rung with no fallback, so a down local daemon fails
+this one call cleanly and the ladder escalates to Tier 3, rather than the gateway quietly
+substituting another model under the Tier-2 label. The verdict reports
+`f"{result.provider.value}:{result.model}"` — the resolved backend, not the class — the
+same shape Tier 3 uses, so a caller can always see who actually answered regardless of which
+rung decided.
 
-### T3 — Cloud LLM (via air-llm)
+### T3 — Cloud LLM (via air-model-gateway)
 
 ```python
 async def analyse(self, ctx: TierContext) -> TierVerdict:
     primary = await self._call(
-        ctx, model=self._config.cloud_model,           # "classify-default" alias, by default
+        ctx, model=self._config.cloud_model,           # the `auto` class, by default
         max_tokens=self._config.max_tokens,
         user_text=user_content(ctx),
     )
@@ -575,42 +579,57 @@ async def analyse(self, ctx: TierContext) -> TierVerdict:
 async def _arbitrate(self, ctx, *, primary, output):
     if output.confidence >= self._config.arbitration_floor or not self._config.arbitration_enabled:
         return primary, primary.to_usage()
-    arbiter = await self._call(ctx, model=self._config.arbiter_model,     # "classify-arbiter" alias
+    arbiter = await self._call(ctx, model=self._config.arbiter_model,     # the `cloud` class
                                 max_tokens=self._config.arbiter_max_tokens,
                                 user_text=user_content(ctx))               # hinted with primary's verdict
     return arbiter, primary.to_usage() + arbiter.to_usage()
 ```
 
-`self._call` wraps one `AirLlmProvider.classify()` behind this rung's own timeout, circuit
-breaker and bulkhead — the guards that decide *whether to attempt* the call at all. Which
-provider actually answers is air-llm's decision, made per request by walking the named
-alias's failover chain; this tier never sees or chooses between the cloud vendors directly.
-`final.provider`/`final.model` in the verdict above are read from air-llm's own response, so
+`self._call` wraps one `ModelGatewayProvider.classify()` behind this rung's own timeout,
+circuit breaker and bulkhead — the guards that decide *whether to attempt* the call at all.
+Which provider actually answers is the gateway's decision, made per request by walking the
+class's failover chain; this tier never sees or chooses between the cloud vendors directly.
+`final.provider`/`final.model` in the verdict above are read from the gateway's response, so
 the trace reports who actually answered even when a chain failed over mid-request.
 
-#### air-llm adapter notes
+#### Gateway adapter notes
 
-- `AirLlmProvider.classify()` POSTs one `InferenceRequest` (`task: "chat"`) to air-llm's
-  `/v1/inference`, with the caller's JSON Schema riding along as `json_schema` — air-llm binds
-  it to whichever structured-output mechanism the answering provider uses internally, so this
-  service never parses prose or retries a schema failure at the HTTP layer. Which mechanism
-  that is for a given vendor is air-llm's own concern, not this service's.
+- `ModelGatewayProvider.classify()` POSTs one `_GenerateRequest` to air-model-gateway's
+  `/v1/generate`: `model` (a class), `messages` (system + user), `max_tokens`, the caller's
+  JSON Schema as `json_schema` plus `schema_name`, and `cache_prefix`. Nothing else — the
+  gateway's `GenerateInput` is `extra="forbid"`, so any other field is a 422 on every call
+  (`tests/unit/test_model_gateway_provider.py` pins the body to the gateway's field set). The
+  gateway binds the schema to whichever structured-output mechanism the answering provider
+  uses, so this service never parses prose or retries a schema failure at the HTTP layer.
+- `X-Request-ID` is forwarded on every call so one id spans this service's logs and the
+  gateway's audit line. `X-Remaining-Budget-Ms` is also sent; the gateway does not read it
+  today (headers, unlike body fields, can't fail the call).
 - **Prompt caching** marks the end of the system prompt as the cacheable prefix. This only
   takes effect above the model's minimum cacheable prefix, which is provider- and
   model-specific and re-measured in `providers/prompts/loader.py`'s own docstring rather than
   duplicated here (`tests/unit/test_prompts.py` asserts it). Below the threshold nothing
   errors; the cache just silently never fills. This is still this service's own prompt to size
-  correctly — air-llm forwards `cache_prefix` but has no opinion on how big the prefix should be.
+  correctly — the gateway forwards `cache_prefix` but has no opinion on how big the prefix
+  should be.
 - The prefix must be **byte-stable**: no timestamps, no request IDs, no per-caller
   interpolation above the cache breakpoint. Volatile content — the text, the caller's
   optional fields, what cheaper tiers already concluded — goes in the user turn only.
-- `AirLlmProvider.classify()` reads the response's own `provider` field for
+- `ModelGatewayProvider.classify()` reads the response's own `provider` field for
   `ProviderResult.provider`, not the adapter's own constructed-with label — cost and usage
   attribution has to follow who actually answered, which can differ from the label whenever
-  an alias's failover chain moved to a different vendor mid-request.
-- Non-2xx handling maps air-llm's own status codes (429 → retryable rate limit, 5xx →
-  unavailable) rather than any one vendor's SDK exceptions — air-llm has already absorbed
-  that per-vendor distinction.
+  a class's failover chain moved to a different vendor mid-request. A provider value this
+  service's `Provider` enum doesn't know falls back to the label rather than failing.
+- `finish_reason` is the gateway's normalized one (`stop`, `length`, `refusal`, `other`) for
+  every provider; `length` means the structured answer was cut off and is a schema failure.
+- Non-2xx handling maps the gateway's status and problem `code`, never any one vendor's SDK
+  exceptions — the gateway has already absorbed that per-vendor distinction. 429 →
+  `ProviderRateLimitError`, except `code: budget_exceeded` →
+  `ProviderBudgetExceededError` (this service's daily budget is spent until the next UTC
+  day). 5xx and transport failures → `ProviderUnavailableError`. Any other 4xx →
+  `ProviderRequestError`, logged at error level with status and code only (never `detail`,
+  which can quote request content). That last split matters: the tiers treat
+  "unavailable" as a capacity gap (`degraded: true`) but a request error as a *failed*
+  rung, so a contract or config break shows in the trace instead of hiding behind fallbacks.
 
 **The remote and local system prompts are different files, not one shared string.** The
 remote one is deliberately long to clear the cache floor above — a cached prefix bills at
@@ -639,13 +658,13 @@ long-form discussion. Both share the same task framing and output schema in the 
 | `TIERS__T1_CLASSIFIER__MARGIN_FLOOR` | `0.25` | Top-2 margin threshold |
 | `TIERS__T1_CLASSIFIER__TIMEOUT_MS` | `400` | Sized for the zero-shot backend — §6 and the §12 changelog |
 | `TIERS__T2_LOCAL_LLM__CONFIDENCE_FLOOR` | `0.72` | — |
-| `AIR_LLM__ENABLED` | `true` | Switches Tiers 2 and 3 off together when false — a local-only deployment is a supported shape |
-| `AIR_LLM__BASE_URL` | `http://localhost:8083` | air-llm's address |
-| `AIR_LLM__TOKEN` | — | Secret, injected; air-llm's service token for this caller |
-| `AIR_LLM__LOCAL_MODEL` | `classify-local` | Tier 2 — an air-llm alias, deliberately single-entry with no failover (§6's T2 note) |
-| `AIR_LLM__CLOUD_MODEL` | `classify-default` | Tier 3 — an air-llm routing alias with its own cross-vendor failover |
-| `AIR_LLM__ARBITER_MODEL` | `classify-arbiter` | Tier 3 arbitration trigger's target alias |
-| `AIR_LLM__ARBITRATION_FLOOR` | `0.65` | Confidence below which the arbiter alias is called |
+| `MODEL_GATEWAY__ENABLED` | `true` | Switches Tiers 2 and 3 off together when false — a local-only deployment is a supported shape |
+| `MODEL_GATEWAY__BASE_URL` | `http://localhost:8083` | air-model-gateway's address |
+| `MODEL_GATEWAY__TOKEN` | — | Secret, injected; the gateway's service token for this caller (it maps the token to `air-classifier-service`) |
+| `MODEL_GATEWAY__LOCAL_MODEL` | `local` | Tier 2 — a model class (`local`\|`auto`\|`cloud`); this service's gateway override makes `local` a single rung with no failover (§6's T2 note) |
+| `MODEL_GATEWAY__CLOUD_MODEL` | `auto` | Tier 3 — cloud-only, cheap-end, cross-vendor chain in this service's gateway override |
+| `MODEL_GATEWAY__ARBITER_MODEL` | `cloud` | Tier 3 arbitration's class — the strongest models |
+| `MODEL_GATEWAY__ARBITRATION_FLOOR` | `0.65` | Confidence below which the arbiter is called |
 | `CACHE__BACKEND` | `memory` | `memory` \| `redis` \| `none` |
 | `CACHE__TTL_SECONDS` | `3600` | Verdict cache TTL |
 | `AUDIT__BACKEND` | `none` | `mongo` \| `none` — no zero-config fallback, unlike cache |
@@ -653,7 +672,7 @@ long-form discussion. Both share the same task framing and output schema in the 
 | `AUDIT__DATABASE` | `air_classifier_service` | — |
 | `AUDIT__TTL_DAYS` | `30` | Native Mongo TTL index; no cleanup job |
 | `AUDIT__QUEUE_MAX_SIZE` | `1000` | Bounded write queue; full queue drops the newest entry |
-| `AIR_LLM__SUMMARY_MODEL` | `summarize-default` | An air-llm alias for `/v1/summary/refresh`'s narrative step — its own alias, no failover chain (a failed refresh degrades, it does not escalate) |
+| `MODEL_GATEWAY__SUMMARY_MODEL` | `local` | Class for `/v1/summary/refresh`'s narrative step — local, no failover (a failed refresh degrades, it does not escalate) |
 | `RESILIENCE__BREAKER_THRESHOLD` | `5` | Consecutive failures to open |
 | `RESILIENCE__BREAKER_COOLDOWN_S` | `30` | Half-open delay |
 | `RESILIENCE__LLM_CONCURRENCY` | `8` | Bulkhead width |
@@ -741,9 +760,9 @@ all, by design (§7's audit config, §8's metric).
 | **Unit** | Policy truth table (each rule in §5 fires exactly when it should); feature extraction; PII redaction; lexicon scoring; breaker state machine; the derivation heuristics (`_derive_urgency`, `_derive_routing`, ...) |
 | **Tier fakes** | Orchestrator driven by scripted fake tiers — verifies ordering, `min_tier`/`max_tier`, budget and cost stops, failure→degrade, best-verdict selection, and the multi-hop lookahead, with **no network at all** |
 | **Contract** | Golden request/response fixtures; OpenAPI snapshot diffed in CI so a schema change cannot land silently |
-| **Provider** | Scripted-stub tests for `AirLlmProvider` against air-llm's `/v1/inference` contract (health, classify, error mapping) — no network, no real air-llm |
-| **Integration** | Real Tier 0/Tier 1 and the real `Orchestrator`/`EscalationPolicy` wired together (`tests/integration/`); Tiers 2/3 are scripted stubs — no external services, nothing opens a socket |
-| **Accuracy** | `evals/golden_set.jsonl` — labelled examples run through the real app (`tests/eval/`), split CI-safe (T0/T1, `make test-eval`) vs. needs-air-llm (T2/T3, `pytest.mark.live`, `make test-eval-live`); a directional calibration check asserts confident cases score meaningfully higher than deliberately-hard ones, not full confusion matrices or ladder-vs-cloud-only agreement measurement — see the file's own docstring for what it does and does not claim |
+| **Provider** | Scripted-stub tests for `ModelGatewayProvider` against air-model-gateway's `/v1/generate` contract (health, body shape, classify, error mapping) — no network, no real gateway |
+| **Integration** | Real Tier 0/Tier 1 and the real `Orchestrator`/`EscalationPolicy` wired together (`tests/integration/`), with Tiers 2/3 as scripted stubs; plus `test_model_gateway_wiring.py`, the real app and adapter against a gateway double at the HTTP layer — no external services, nothing opens a socket |
+| **Accuracy** | `evals/golden_set.jsonl` — labelled examples run through the real app (`tests/eval/`), split CI-safe (T0/T1, `make test-eval`) vs. needs-the-gateway (T2/T3, `pytest.mark.live`, `make test-eval-live`); a directional calibration check asserts confident cases score meaningfully higher than deliberately-hard ones, not full confusion matrices or ladder-vs-cloud-only agreement measurement — see the file's own docstring for what it does and does not claim |
 
 ## 11. Implementation order
 
@@ -768,6 +787,47 @@ deliberate: it pins the ladder's semantics while they are still cheap to change.
 
 Corrections to this document worth leaving a trace of, newest first. Each entry says what
 changed and why; the *current* behaviour is described in the sections above, not here.
+
+- **Renamed air-llm → air-model-gateway throughout, 2026-11-13.** Follows the move to
+  `/v1/generate` below, and air-model-gateway's own request that consumers drop the old
+  name. Code: `providers/air_llm_provider.py` → `providers/model_gateway_provider.py`,
+  `AirLlmProvider` → `ModelGatewayProvider`, `AirLlmSettings` → `ModelGatewaySettings`,
+  `Settings.air_llm` → `Settings.model_gateway`, and the summary call's breaker/bulkhead name
+  `air_llm_summary` → `model_gateway_summary` (log-only: breakers outside `Provider` are not
+  exported as a metric label). Configuration: every `AIR_CLASSIFIER__AIR_LLM__*` key →
+  `AIR_CLASSIFIER__MODEL_GATEWAY__*`, and the test/script variables `AIR_LLM_TOKEN`,
+  `AIR_LLM_BASE_URL`, `AIR_LLM_DIR` → `MODEL_GATEWAY_*`. A clean rename with no fallback
+  to the old names (still in development; no deployment to migrate). `Settings` is
+  `extra="ignore"`, so an old key is silently dropped rather than rejected: a `.env` still
+  setting `AIR_LLM__TOKEN` boots with no token, and Tiers 2 and 3 report "not configured"
+  in `/v1/ready`. The
+  `/v1/ready` and `/v1/capabilities` reason text "air-llm not configured" → "air-model-gateway
+  not configured" (text only; no schema change, `docs/openapi.json` unchanged). Docs
+  rewritten for model classes rather than aliases. Unchanged on purpose: the
+  `AIR_CLASSIFIER__` prefix, the `air_classifier_*` metric names, the
+  `air-classifier-dev` local token (the gateway's), port 8083, and dated history in this
+  changelog and in `00-plan.md`. Not part of this rename: the `air-infra` references.
+
+- **Model calls moved from air-llm's `POST /v1/inference` to air-model-gateway's
+  `POST /v1/generate`, 2026-11-13.** air-llm was replaced by air-model-gateway, which has
+  removed `/v1/inference` and the alias names it resolved. This service now asks for a
+  *model class* (`local`, `auto`, `cloud`, `constants.ModelClass`) rather than an alias:
+  Tier 2 and the summary narrative `local`, Tier 3 `auto`, the arbiter `cloud`. The
+  gateway's per-service routing override (its `deploy/routing.yaml`,
+  `overrides.air-classifier-service`) keeps each class's guarantees: `local` is one local
+  rung with no fallback, so a local outage still fails the call and this ladder decides
+  what's next; `auto` is cloud-only and cheap-end; `cloud` holds the strongest models.
+  The old Tier-2 `provider:model` bypass would now be a `pin`, which needs a grant this
+  service neither has nor needs. The `*_MODEL` settings are typed as `ModelClass`, so a
+  retired alias fails at startup instead of 422-ing every call. The adapter also
+  (a) no longer sends `task` (the gateway's body is `extra="forbid"`); (b) forwards
+  `X-Request-ID`; (c) maps a 4xx other than 429 to a new `ProviderRequestError` and logs it
+  at error level, because filing a contract or config break under "unavailable" let the
+  ladder degrade every request to Tier 1 behind 200s; (d) tells 429 `budget_exceeded`
+  (the gateway's per-service daily budget, clears at the next UTC day) apart from
+  `rate_limited` as `ProviderBudgetExceededError`. `Provider` gains `llama.cpp`, the
+  gateway's self-hosted slot. The `AIR_LLM__*` setting names and the `AirLlm*` code names
+  are unchanged by this entry.
 
 - **Service renamed `air-classifier` → `air-classifier-service`, 2026-09-05.** Aligns with
   the AIR platform's naming convention ahead of the git repository itself being renamed. Full

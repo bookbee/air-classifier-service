@@ -106,7 +106,7 @@ class AppState:
     #: parameter, so this module never needs to import `audit/factory.py`.
     audit: AuditSink | None = None
     #: `main.py`'s lifespan always constructs a real one — the narrative-refresh
-    #: call inside it degrades on its own when air-llm is not configured, so the
+    #: call inside it degrades on its own when air-model-gateway is not configured, so the
     #: service itself never needs to be absent. `None` is only the default for a
     #: minimal `AppState` built by hand (tests, `api/v1/system.py`'s bare test
     #: app), matching `tiers`'s own empty-tuple default above.

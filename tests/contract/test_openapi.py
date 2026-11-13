@@ -33,9 +33,9 @@ import pytest
 from fastapi import FastAPI
 
 from air_classifier_service.config import (
-    AirLlmSettings,
     AppSettings,
     CacheSettings,
+    ModelGatewaySettings,
     Settings,
 )
 from air_classifier_service.main import create_app
@@ -76,14 +76,14 @@ EXPECTED_ERROR_STATUSES: Final[frozenset[str]] = frozenset(
 def app() -> FastAPI:
     """The real application, assembled but never started.
 
-    air-llm off, so nothing in this module can be tempted to open a
+    air-model-gateway off, so nothing in this module can be tempted to open a
     connection. That choice does not reach the document: the routes are
     declared the same way whatever the ladder turns out to be.
     """
     return create_app(
         Settings(
             app=AppSettings(env="test"),
-            air_llm=AirLlmSettings(enabled=False),
+            model_gateway=ModelGatewaySettings(enabled=False),
             cache=CacheSettings(backend="memory"),
         )
     )

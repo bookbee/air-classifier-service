@@ -9,17 +9,33 @@ IMAGE   ?= air-classifier-service
 TAG     ?= dev
 HOST    ?= 127.0.0.1
 # 8082 in the AIR port map: 8080 is air-infra, 8081 is air-platform, 8083 is
-# air-llm — every model call this service makes goes there.
+# air-model-gateway — every model call this service makes goes there.
 PORT    ?= 8082
 
 SERVE_LOG ?= .run/service.log
 
 # The network air-infra publishes. Redis and Prometheus live there, not here.
-# Model access (Tier 2 and Tier 3 both) is air-llm's, reached over the host —
-# see docker-compose.yml — never through this network.
+# Model access (Tier 2 and Tier 3 both) is air-model-gateway's, reached over the
+# host — see docker-compose.yml — never through this network.
 NETWORK ?= air-net
 INFRA_DIR ?= ../air-infra
-AIR_LLM_DIR ?= ../air-llm
+
+# Container runs only: `shared` (default) joins air-infra's air-net and its
+# Redis, and refuses to start without them; `none` runs this service on its own
+# network with an in-process cache (docker-compose.standalone.yml). The native
+# loop (`make run`) never touches either network.
+INFRA ?= shared
+STANDALONE_NETWORK := air-classifier-service-net
+ifeq ($(INFRA),shared)
+COMPOSE_FILES := -f docker-compose.yml
+UP_DEPS := infra-check
+else ifeq ($(INFRA),none)
+COMPOSE_FILES := -f docker-compose.yml -f docker-compose.standalone.yml
+UP_DEPS :=
+else
+$(error INFRA must be `shared` or `none`, got `$(INFRA)`)
+endif
+MODEL_GATEWAY_DIR ?= ../air-model-gateway
 
 # The listening server, and only it. `lsof -ti tcp:$(PORT)` on its own also
 # matches every client *connected* to that port — a browser tab, air-client,
@@ -38,7 +54,7 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Overridable: IMAGE=$(IMAGE) TAG=$(TAG) HOST=$(HOST) PORT=$(PORT)"
+	@echo "Overridable: IMAGE=$(IMAGE) TAG=$(TAG) HOST=$(HOST) PORT=$(PORT) INFRA=$(INFRA) (shared|none)"
 
 $(PY):
 	python3.12 -m venv $(VENV)
@@ -91,7 +107,7 @@ test-integration: ## Run the multi-component wiring suite (tests/integration/, n
 test-eval: ## Run the golden accuracy/calibration set (tests/eval/, no external services) — put this in CI
 	$(PYTEST) tests/eval -m "not live"
 
-test-eval-live: ## Run the golden set's T2/T3 cases against a reachable air-llm (AIR_LLM_TOKEN, AIR_LLM_BASE_URL)
+test-eval-live: ## Run the golden set's T2/T3 cases against a reachable air-model-gateway (MODEL_GATEWAY_TOKEN, MODEL_GATEWAY_BASE_URL)
 	$(PYTEST) tests/eval -m live
 
 lint: ## Ruff lint + format check
@@ -122,23 +138,35 @@ infra-check: ## Fail early if air-infra's shared stack is not up
 		echo; \
 		echo "    cd $(INFRA_DIR) && make up"; \
 		echo; \
+		echo "Or run this service without them (own network, in-memory cache):"; \
+		echo; \
+		echo "    make up INFRA=none"; \
+		echo; \
 		exit 1; }
 
-up: infra-check ## Start this service as a container, against air-infra + air-llm
-	$(COMPOSE) up -d --build
+up: $(UP_DEPS) ## Start this service as a container (INFRA=none: without air-infra's network and Redis)
+	$(COMPOSE) $(COMPOSE_FILES) up -d --build
 	@echo
 	@echo "api      http://$(HOST):$(PORT)/v1/health"
-	@echo "air-llm  http://host.docker.internal:8083 (cd $(AIR_LLM_DIR) && make up if it is not)"
+	@echo "models   http://host.docker.internal:8083, air-model-gateway (cd $(MODEL_GATEWAY_DIR) && make up if it is not)"
+ifeq ($(INFRA),shared)
 	@echo "metrics  scraped by air-infra's prometheus (make up-observability there)"
+else
+	@echo "cache    in-process (INFRA=none: no air-net, no shared Redis)"
+endif
 
-down: ## Stop this service. Shared dependencies keep running in air-infra/air-llm.
-	$(COMPOSE) down --remove-orphans
+down: ## Stop this service. Shared dependencies keep running in air-infra/air-model-gateway.
+	$(COMPOSE) $(COMPOSE_FILES) down --remove-orphans
+	@# A standalone run stopped without INFRA=none leaves its own network behind,
+	@# because the base file only knows the external air-net. Remove it if unused.
+	@docker network rm $(STANDALONE_NETWORK) >/dev/null 2>&1 || true
 
 logs: ## Tail the app's logs
-	$(COMPOSE) logs -f --tail=100 air-classifier-service
+	$(COMPOSE) $(COMPOSE_FILES) logs -f --tail=100 air-classifier-service
 
 doctor: ## Check this service's dependencies are reachable
-	@NETWORK=$(NETWORK) INFRA_DIR=$(INFRA_DIR) AIR_LLM_DIR=$(AIR_LLM_DIR) \
+	@NETWORK=$(NETWORK) INFRA_DIR=$(INFRA_DIR) MODEL_GATEWAY_DIR=$(MODEL_GATEWAY_DIR) \
+		INFRA=$(INFRA) STANDALONE_NETWORK=$(STANDALONE_NETWORK) \
 		HOST=$(HOST) PORT=$(PORT) bash scripts/doctor.sh
 
 clean: ## Remove build and tool caches (leaves .venv alone)

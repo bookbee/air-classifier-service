@@ -83,12 +83,13 @@ def test_system_prompt_clears_the_cloud_prompt_cache_floor() -> None:
     """Do not let this fall below 4096 tokens.
 
     4096 tokens is the minimum cacheable prefix on the provider currently
-    behind `air_llm.cloud_model`'s default rung. Below it nothing errors — the
+    behind `model_gateway.cloud_model`'s default rung. Below it nothing errors — the
     cache simply never fills and every request pays full input price forever,
     roughly a tenfold increase on the cached portion of the cloud bill.
     Shortening `system.md` is therefore a cost regression that no other test
-    would catch. If air-llm's alias ever defaults to a provider with a
-    different floor, this number is the one to revisit.
+    would catch. If air-model-gateway's `auto` chain for this service ever leads
+    with a provider that has a different floor, this number is the one to
+    revisit.
     """
     assert CLOUD_MIN_CACHEABLE_TOKENS == 4096
     assert estimated_system_tokens() >= CLOUD_MIN_CACHEABLE_TOKENS
@@ -331,16 +332,16 @@ def test_the_local_prompt_leaves_room_for_the_longest_input_we_accept() -> None:
     """The compact prefix must fit the local model's context window with the
     largest allowed text beside it.
 
-    That window is air-llm's own ``ollama`` config now, not a setting this
-    service can read — the cutover to air-llm moved Ollama's connection
-    details, including ``num_ctx``, out of this codebase entirely. What
-    remains checkable from here is the assumption the split prompt was sized
-    against: air-llm's Ollama config defaulted to 8192 at cutover, and
-    undersizing it does not error on the Ollama side either — the prompt is
-    truncated and the model silently loses its instructions. If this
-    assertion ever fails, the fix is not in this file: either the compact
-    prompt grew, or the two services' assumptions about the context window
-    have drifted and need reconciling against air-llm's actual config.
+    That window is not a setting this service can read: Ollama's connection
+    details live behind air-model-gateway, whose Ollama adapter does not set
+    ``num_ctx`` per request, so the window is the Ollama server's own
+    configuration. What remains checkable from here is the assumption the
+    split prompt was sized against, 8192 tokens, and undersizing it does not
+    error on the Ollama side either — the prompt is truncated and the model
+    silently loses its instructions. If this assertion ever fails, the fix is
+    not in this file: either the compact prompt grew, or the assumed window
+    needs reconciling against the Ollama server the gateway's `local` class
+    actually reaches.
     """
     longest_input_tokens = MAX_TEXT_CHARS / 3.7
     needed = estimated_compact_tokens() + longest_input_tokens

@@ -69,7 +69,7 @@ logger = get_logger(__name__)
 #: no `air_classifier_breaker_state` gauge visibility for this path
 #: specifically (`resilience/breaker.py::_publish_state` skips names it can't
 #: parse as a `Provider`).
-_DEPENDENCY_NAME: Final[str] = "air_llm_summary"
+_DEPENDENCY_NAME: Final[str] = "model_gateway_summary"
 
 #: Items with no `occurred_at` sort after every dated one, and (fixed rather
 #: than `None`) never compare two absent timestamps to each other, which
@@ -118,7 +118,9 @@ class SummaryService:
         pairs = _succeeded_pairs(request.items, batch_items)
         existing = request.existing_summary
         rollup = _merge_rollup(existing.rollup if existing is not None else None, pairs)
-        narrative, degraded = await self._refresh_narrative(existing=existing, pairs=pairs)
+        narrative, degraded = await self._refresh_narrative(
+            existing=existing, pairs=pairs, request_id=request_id
+        )
 
         return SummaryRefreshResponse(
             request_id=request_id,
@@ -141,6 +143,7 @@ class SummaryService:
         *,
         existing: CustomerSummary | None,
         pairs: Sequence[tuple[SummaryItem, ClassificationResponse]],
+        request_id: str,
     ) -> tuple[str, bool]:
         """The updated narrative, and whether the refresh itself degraded.
 
@@ -155,7 +158,7 @@ class SummaryService:
         system = summary_system_prompt()
         user = summary_user_content(existing=existing, items=pairs)
         try:
-            result = await self._classify_with_one_repair(system, user)
+            result = await self._classify_with_one_repair(system, user, request_id=request_id)
         except (ProviderError, TimeoutError, CircuitOpenError, BulkheadFullError) as exc:
             logger.warning("summary.narrative_refresh_failed", error=type(exc).__name__)
             return prior, True
@@ -166,7 +169,9 @@ class SummaryService:
             return prior, True
         return parsed.narrative, False
 
-    async def _classify_with_one_repair(self, system: str, user: str) -> ProviderResult:
+    async def _classify_with_one_repair(
+        self, system: str, user: str, *, request_id: str
+    ) -> ProviderResult:
         """One call, then at most one more with the validation errors appended.
 
         Mirrors `LocalLLMTier._classify_with_one_repair` exactly — a small
@@ -174,14 +179,16 @@ class SummaryService:
         failure is left to propagate rather than looped on.
         """
         try:
-            return await self._call(system, user)
+            return await self._call(system, user, request_id=request_id)
         except ProviderSchemaError as first:
             errors = str(first)
-        return await self._call(system, user + summary_repair_instruction(errors))
+        return await self._call(
+            system, user + summary_repair_instruction(errors), request_id=request_id
+        )
 
-    async def _call(self, system: str, user: str) -> ProviderResult:
+    async def _call(self, system: str, user: str, *, request_id: str) -> ProviderResult:
         assert self._provider is not None  # narrowed by _refresh_narrative's own check
-        timeout_s = self._settings.air_llm.summary_timeout_s
+        timeout_s = self._settings.model_gateway.summary_timeout_s
         return await guarded(
             self._provider.classify,
             timeout_s=timeout_s,
@@ -190,10 +197,11 @@ class SummaryService:
             system_prompt=system,
             user_content=user,
             output_model=LLMSummaryOutput,
-            model=self._settings.air_llm.summary_model,
-            max_tokens=self._settings.air_llm.summary_max_tokens,
+            model=self._settings.model_gateway.summary_model,
+            max_tokens=self._settings.model_gateway.summary_max_tokens,
             cache_prefix=True,
             remaining_ms=timeout_s * 1000.0,
+            request_id=request_id,
         )
 
 

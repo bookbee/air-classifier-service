@@ -9,14 +9,15 @@ response to that is a stronger model rather than the same one again. It happens
 at most once — there is no loop here — and both calls' tokens and cost are
 counted, because a spend ceiling that only saw the second call would be a lie.
 
-**Failure degrades, it never propagates.** A refusal, an open breaker, or air-llm
+**Failure degrades, it never propagates.** A refusal, an open breaker, or air-model-gateway
 being unreachable becomes a :class:`TierError`, which the orchestrator turns
 into a failed verdict and a lower rung's answer. There is no path from this
 module to a 5xx.
 
-This rung no longer selects *among* cloud providers — that failover is air-llm's
-job now, expressed as a routing alias (``config.py``'s ``AirLlmSettings.
-cloud_model``/``arbiter_model``), not a ``ProviderRegistry`` here. What is still
+This rung does not select *among* cloud providers — that failover is
+air-model-gateway's job, expressed as a model class whose chain the gateway owns
+(``config.py``'s ``ModelGatewaySettings.cloud_model``/``arbiter_model``), not a
+``ProviderRegistry`` here. What is still
 this rung's job: deciding *whether* the fast model's answer was good enough, and
 asking for a second, stronger opinion when it was not.
 """
@@ -26,7 +27,7 @@ from __future__ import annotations
 import time
 from typing import Final
 
-from air_classifier_service.config import AirLlmSettings, Settings
+from air_classifier_service.config import ModelGatewaySettings, Settings
 from air_classifier_service.constants import Tier
 from air_classifier_service.observability.logging import get_logger
 from air_classifier_service.observability.metrics import record_llm_usage
@@ -74,12 +75,13 @@ class CloudLLMTier:
     ) -> None:
         self._settings = settings
         self._provider = provider
-        self._config: AirLlmSettings = settings.air_llm
+        self._config: ModelGatewaySettings = settings.model_gateway
         self._tier_settings = settings.tiers.for_tier(self.tier)
         dependency = provider.name.value
         self._bulkhead = bulkhead or Bulkhead.from_settings(dependency, settings.resilience)
         self._breaker = breaker or CircuitBreaker.from_settings(dependency, settings.resilience)
-        self.model_version = self._config.cloud_model
+        # The class asked for (`auto`); the concrete model is per answer.
+        self.model_version: str = self._config.cloud_model.value
 
     async def is_available(self) -> bool:
         if not self._provider.configured or not self._breaker.is_closed:
@@ -94,10 +96,10 @@ class CloudLLMTier:
         """Same order `is_available` checks in, so the two cannot disagree
         about *which* condition is the one actually blocking this rung."""
         if not self._provider.configured:
-            # `configured` is an air-llm-level check (AIR_LLM__ENABLED /
-            # AIR_LLM__TOKEN), not per-vendor — naming the breaker label here
+            # `configured` is a gateway-level check (MODEL_GATEWAY__ENABLED /
+            # MODEL_GATEWAY__TOKEN), not per-vendor — naming the breaker label here
             # would send an operator looking for a knob that does not exist.
-            return "air-llm not configured"
+            return "air-model-gateway not configured"
         if not self._breaker.is_closed:
             return f"circuit breaker open for {self._provider.name.value} — retries after cooldown"
         return self._provider.health_detail
@@ -233,7 +235,7 @@ class CloudLLMTier:
         """One logical call, with a single bounded repair retry on a bad parse.
 
         Only a schema failure is retried, and only once. A transport failure is
-        air-llm's own retry budget to spend, and a second bad parse is a model
+        air-model-gateway's own retry budget to spend, and a second bad parse is a model
         that cannot follow the schema today — looping on it burns the latency
         budget to arrive at the same escalation.
         """
@@ -280,6 +282,7 @@ class CloudLLMTier:
                 max_tokens=max_tokens,
                 cache_prefix=True,
                 remaining_ms=timeout_s * 1000.0,
+                request_id=ctx.request_id,
             )
         except ProviderRefusalError as exc:
             raise TierError(f"cloud provider refused: {exc}") from exc
@@ -318,7 +321,7 @@ def _output_of(result: ProviderResult) -> LLMSentimentOutput:
 
 def _record(result: ProviderResult) -> None:
     # `result.provider` is who actually answered, which may differ from this
-    # tier's own provider label when air-llm's alias failed over vendors.
+    # tier's own provider label when the gateway's chain failed over vendors.
     record_llm_usage(
         result.provider,
         result.model,

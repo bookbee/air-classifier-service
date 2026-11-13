@@ -23,8 +23,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# No per-vendor LLM SDKs here: every model call goes through air-llm's HTTP
-# API (providers/air_llm_provider.py), not a vendor client library.
+# No per-vendor LLM SDKs here: every model call goes through air-model-gateway's HTTP
+# API (providers/model_gateway_provider.py), not a vendor client library.
 redis = ["redis>=5.2"]
 mongo = ["motor>=3.5"]
 onnx = ["onnxruntime>=1.20", "tokenizers>=0.20", "numpy>=1.26"]

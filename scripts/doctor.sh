@@ -4,7 +4,7 @@
 # service itself is serving. Works whether air-classifier-service is running natively
 # (`make run` / `make start`) or as a container (`make up`).
 #
-# Redis is air-infra's; every model call (Tier 2 and Tier 3 both) is air-llm's.
+# Redis is air-infra's; every model call (Tier 2 and Tier 3 both) is air-model-gateway's.
 # This script only verifies they are there and answering, and says where to go
 # when they are not.
 #
@@ -13,7 +13,11 @@ set -uo pipefail
 
 NETWORK="${NETWORK:-air-net}"
 INFRA_DIR="${INFRA_DIR:-../air-infra}"
-AIR_LLM_DIR="${AIR_LLM_DIR:-../air-llm}"
+# `shared` expects air-infra's network and Redis; `none` is the standalone
+# container run (`make up INFRA=none`), where their absence is expected.
+INFRA="${INFRA:-shared}"
+STANDALONE_NETWORK="${STANDALONE_NETWORK:-air-classifier-service-net}"
+MODEL_GATEWAY_DIR="${MODEL_GATEWAY_DIR:-../air-model-gateway}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8082}"
 
@@ -26,29 +30,42 @@ note() { printf '  \033[33m!\033[0m %s\n' "$1"; warn=$((warn + 1)); }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 hdr "air-infra (redis)"
+# A container already running on the standalone network says which mode this
+# is, whatever INFRA was passed: doctor reports what is, not what was asked for.
+standalone=0
+if [ "$INFRA" = "none" ]; then
+  standalone=1
+elif docker network inspect "$STANDALONE_NETWORK" \
+    --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | grep -q .; then
+  standalone=1
+fi
 if ! docker info >/dev/null 2>&1; then
   bad "docker daemon unreachable — start Docker Desktop"
+elif [ "$standalone" -eq 1 ]; then
+  ok "standalone run (INFRA=none): own network '$STANDALONE_NETWORK', in-process cache — air-infra not needed"
 elif docker network inspect "$NETWORK" >/dev/null 2>&1; then
   ok "network '$NETWORK' is up"
 else
-  bad "network '$NETWORK' is missing — run 'cd $INFRA_DIR && make up'"
+  bad "network '$NETWORK' is missing — run 'cd $INFRA_DIR && make up', or 'make up INFRA=none' to run without it"
 fi
 
 # Addressed on the host, which is how the native inner loop reaches it and how
 # a developer verifies it regardless of where this service is running.
-if docker exec air-infra-redis-1 redis-cli -a localdevpass ping 2>/dev/null | grep -q PONG; then
+if [ "$standalone" -eq 1 ]; then
+  : # nothing to check: the standalone run's cache lives in the container
+elif docker exec air-infra-redis-1 redis-cli -a localdevpass ping 2>/dev/null | grep -q PONG; then
   ok "redis answers an authenticated PING"
 else
   bad "air-infra's redis is not answering — 'cd $INFRA_DIR && make ps'"
 fi
 
-hdr "air-llm (tiers 2 and 3)"
+hdr "air-model-gateway (tiers 2 and 3)"
 # Report what the service is ACTUALLY configured with, not a guess — a
-# container started against one air-llm keeps that URL regardless of what is
+# container started against one air-model-gateway keeps that URL regardless of what is
 # reachable when doctor is later called.
 container=$(docker ps --filter 'name=air-classifier-service-air-classifier-service' --format '{{.Names}}' 2>/dev/null | head -1)
 if [ -n "$container" ]; then
-  effective=$(docker exec "$container" printenv AIR_CLASSIFIER__AIR_LLM__BASE_URL 2>/dev/null)
+  effective=$(docker exec "$container" printenv AIR_CLASSIFIER__MODEL_GATEWAY__BASE_URL 2>/dev/null)
   ok "container $container dials ${effective:-<unset, defaults to http://localhost:8083>}"
   probe_url="${effective:-http://127.0.0.1:8083}"
 else
@@ -61,10 +78,10 @@ fi
 probe_url=$(printf '%s' "$probe_url" | sed 's/host\.docker\.internal/127.0.0.1/')
 
 if curl -sf -m 3 "${probe_url}/v1/ready" >/dev/null 2>&1; then
-  ok "air-llm answers on ${probe_url}"
+  ok "air-model-gateway answers on ${probe_url}"
 else
-  note "air-llm is not answering on ${probe_url} — ladder degrades to t1_classifier, which is not an error"
-  note "  fix: cd $AIR_LLM_DIR && make up"
+  note "air-model-gateway is not answering on ${probe_url} — ladder degrades to t1_classifier, which is not an error"
+  note "  fix: cd $MODEL_GATEWAY_DIR && make up"
 fi
 
 hdr "This service"
@@ -92,7 +109,7 @@ fi
 hdr "Port hygiene"
 # This repo must publish exactly one host port. Anything else here means a
 # shared component has crept back in and is re-binding a port air-infra or
-# air-llm owns.
+# air-model-gateway owns.
 mine=$(docker ps --filter 'label=com.docker.compose.project=air-classifier-service' \
   --format '{{.Names}} {{.Ports}}' 2>/dev/null)
 if [ -z "$mine" ]; then
@@ -102,7 +119,7 @@ else
   if [ -z "$shared" ]; then
     ok "publishes only :$PORT — no shared ports re-bound"
   else
-    bad "re-binding port(s) air-infra/air-llm owns: $(printf '%s ' $shared)"
+    bad "re-binding port(s) air-infra/air-model-gateway owns: $(printf '%s ' $shared)"
   fi
 fi
 
