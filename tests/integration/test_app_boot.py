@@ -6,7 +6,7 @@ middleware stack, real error handlers, real Tier 0 and Tier 1 — and asks the
 question none of the unit suites can: *does it come up at all, and does it come
 up honest about what it can do?*
 
-The deployment under test is the awkward one on purpose: no Redis, no air-llm.
+The deployment under test is the awkward one on purpose: no Redis, no air-model-gateway.
 That configuration is not a degenerate case to be tolerated, it is the one a
 developer runs on a laptop and the one a fresh cluster runs before its secrets
 land, and the service is specified to boot in it with a two-rung ladder. A
@@ -40,9 +40,9 @@ from air_classifier_service.api.deps import STATE_ATTR, AppState
 from air_classifier_service.api.errors import PROBLEM_CONTENT_TYPE
 from air_classifier_service.cache.memory import MemoryCache
 from air_classifier_service.config import (
-    AirLlmSettings,
     AppSettings,
     CacheSettings,
+    ModelGatewaySettings,
     SecuritySettings,
     Settings,
 )
@@ -66,8 +66,8 @@ AUTH: Final[dict[str, str]] = {HEADER_API_KEY: RAW_API_KEY}
 
 pytestmark = pytest.mark.integration
 
-#: air-llm's readiness endpoint — what every tier's own probe calls.
-_AIR_LLM_READY_URL: Final[str] = "http://localhost:8083/v1/ready"
+#: air-model-gateway's readiness endpoint — what every tier's own probe calls.
+_MODEL_GATEWAY_READY_URL: Final[str] = "http://localhost:8083/v1/ready"
 
 #: Unambiguous polarity, so the verdict is decided low on the ladder rather than
 #: by whichever rung happens to be least uncertain about a borderline sentence.
@@ -88,21 +88,21 @@ def _api_keys_inline() -> str:
     )
 
 
-def build_settings(*, air_llm_enabled: bool = False, docs_enabled: bool = True) -> Settings:
+def build_settings(*, model_gateway_enabled: bool = False, docs_enabled: bool = True) -> Settings:
     """A deployment with nothing external configured.
 
-    ``air_llm_enabled`` defaults to *off* so the ladder is exactly two rungs and
-    no test can accidentally depend on air-llm being reachable from the machine
+    ``model_gateway_enabled`` defaults to *off* so the ladder is exactly two rungs and
+    no test can accidentally depend on air-model-gateway being reachable from the machine
     running it. Tiers 2 and 3 share this one gate now — the one test that wants
-    Tier 2 present without Tier 3 turns air-llm on here and disables Tier 3 on
+    Tier 2 present without Tier 3 turns air-model-gateway on here and disables Tier 3 on
     its own (``settings.tiers.t3_cloud_llm.enabled = False``), then mocks the
     transport.
     """
     return Settings(
         app=AppSettings(env="test", docs_enabled=docs_enabled),
-        air_llm=AirLlmSettings(
-            enabled=air_llm_enabled,
-            token=SecretStr("test-token") if air_llm_enabled else None,
+        model_gateway=ModelGatewaySettings(
+            enabled=model_gateway_enabled,
+            token=SecretStr("test-token") if model_gateway_enabled else None,
         ),
         cache=CacheSettings(backend="memory"),
         security=SecuritySettings(
@@ -152,7 +152,7 @@ def client(app: FastAPI) -> Iterator[TestClient]:
 def test_boots_with_no_external_services_and_serves_two_rungs(app: FastAPI) -> None:
     """The headline property: nothing configured, and the service still comes up.
 
-    Tiers 2 and 3 both stand down because air-llm is switched off. Both are
+    Tiers 2 and 3 both stand down because air-model-gateway is switched off. Both are
     *skips*, and the difference between a skip and a crash is the difference
     between a degraded deployment and no deployment.
     """
@@ -209,7 +209,7 @@ def test_shutdown_releases_the_cache(app: FastAPI) -> None:
 
 
 def test_boots_with_audit_backend_mongo_unreachable() -> None:
-    """The optional-dependency contract audit shares with cache and air-llm."""
+    """The optional-dependency contract audit shares with cache and air-model-gateway."""
     settings = build_settings()
     settings.audit.backend = "mongo"
     settings.audit.mongo_url = "mongodb://127.0.0.1:1/"
@@ -272,15 +272,15 @@ def test_ready_is_ok_when_every_registered_rung_answers(client: TestClient) -> N
 def test_ready_is_degraded_not_unready_when_an_upper_rung_is_down() -> None:
     """An unreachable dependency costs quality, not rotation.
 
-    Tier 2 is built (air-llm is switched on, Tier 3 disabled on its own) but
-    air-llm refuses the connection. Returning 503 here would drain every pod in
+    Tier 2 is built (air-model-gateway is switched on, Tier 3 disabled on its own) but
+    air-model-gateway refuses the connection. Returning 503 here would drain every pod in
     the fleet at once for a failure the ladder is designed to absorb, so the
     contract is 200 plus ``degraded`` — and this is the test that pins it end
     to end.
     """
-    respx.get(_AIR_LLM_READY_URL).mock(side_effect=httpx.ConnectError("connection refused"))
+    respx.get(_MODEL_GATEWAY_READY_URL).mock(side_effect=httpx.ConnectError("connection refused"))
 
-    settings = build_settings(air_llm_enabled=True)
+    settings = build_settings(model_gateway_enabled=True)
     settings.tiers.t3_cloud_llm.enabled = False
     with TestClient(create_app(settings)) as started:
         assert tier_ids(started.app) == (
@@ -330,7 +330,7 @@ def test_capabilities_requires_a_key_unlike_health_and_ready(client: TestClient)
     """Deployment detail, not a load-balancer boolean.
 
     `/v1/health` and `/v1/ready` stay open for a kubelet that carries no
-    credential; `/v1/capabilities` discloses configured model/alias names and
+    credential; `/v1/capabilities` discloses configured model classes and
     which Tier-1 backend actually loaded, so it sits behind the same
     auth/rate-limit dependency `/v1/classify` does instead.
     """
@@ -469,8 +469,8 @@ def test_summary_service_is_always_built(app: FastAPI) -> None:
         assert app_state_of(app).summary_service is not None
 
 
-def test_summary_refresh_degrades_without_air_llm(client: TestClient) -> None:
-    """This deployment has no air-llm: the rollup still works, the narrative degrades."""
+def test_summary_refresh_degrades_without_model_gateway(client: TestClient) -> None:
+    """This deployment has no air-model-gateway: the rollup still works, the narrative degrades."""
     response = client.post(
         "/v1/summary/refresh",
         json={

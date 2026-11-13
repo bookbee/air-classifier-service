@@ -76,7 +76,7 @@ class LocalLLMTier:
     ) -> None:
         self._settings = settings
         self._provider = provider
-        self._model = settings.air_llm.local_model
+        self._model = settings.model_gateway.local_model
         # The class asked for (`local`); the concrete model is per answer.
         self.model_version: str = self._model.value
 
@@ -107,10 +107,10 @@ class LocalLLMTier:
         """Same order `is_available` checks in, so the two cannot disagree
         about *which* condition is the one actually blocking this rung."""
         if not self._provider.configured:
-            # `configured` is an air-llm-level check (AIR_LLM__ENABLED /
-            # AIR_LLM__TOKEN), not per-vendor — naming the breaker label here
+            # `configured` is a gateway-level check (MODEL_GATEWAY__ENABLED /
+            # MODEL_GATEWAY__TOKEN), not per-vendor — naming the breaker label here
             # would send an operator looking for a knob that does not exist.
-            return "air-llm not configured"
+            return "air-model-gateway not configured"
         if not self._breaker.is_closed:
             return f"circuit breaker open for {self._provider.name.value} — retries after cooldown"
         return self._provider.health_detail

@@ -99,7 +99,7 @@ class ModelClass(StrEnum):
     its own ``deploy/routing.yaml``, with a per-service override for this
     service, so the chain behind each class is the gateway owner's to tune.
     The values are the gateway's wire vocabulary and are config values here
-    (``AIR_LLM__*_MODEL``), so they are public surface on both sides.
+    (``MODEL_GATEWAY__*_MODEL``), so they are public surface on both sides.
     """
 
     #: Our own hardware; the prompt never leaves the network. This service's

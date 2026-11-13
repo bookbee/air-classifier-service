@@ -21,8 +21,8 @@ that trade is worth making.
 
 It is one service in the AIR platform, consumed by other AIR services and by `air-client`'s
 demo UI. It holds no model weights or provider credentials of its own beyond Tier 1's local
-classifier artifact — every LLM call (Tiers 2 and 3) is delegated to **air-llm**, the
-platform's model gateway.
+classifier artifact — every LLM call (Tiers 2 and 3) is delegated to **air-model-gateway**,
+the platform's model gateway.
 
 ## 2. Architecture
 
@@ -32,8 +32,8 @@ Caller → air-classifier-service
            ├─ Tier 0  rules/lexicon shortcuts        (in-process, ~0ms, free)
            ├─ Tier 1  local ONNX classifier           (in-process, ~200ms, free)
            ├─ Tier 2  local LLM   ──┐
-           └─ Tier 3  cloud LLM   ──┴──→ air-llm ──→ whichever provider its
-                                              routing alias resolves to today
+           └─ Tier 3  cloud LLM   ──┴──→ air-model-gateway ──→ whichever provider
+                                     POST /v1/generate      the class's chain reaches
 ```
 
 Each tier implements one `Tier` protocol (`is_available`, `unavailable_reason`, `analyse`,
@@ -46,10 +46,11 @@ exercised in tests with four fakes and no network.
 
 **Where it sits in the platform:**
 - **air-infra** — shared Redis (verdict/idempotency cache), reached over `air-net`.
-- **air-llm** — the only path to any model, local or cloud. air-classifier owns three
-  routing aliases in air-llm's `deploy/routing.yaml` (`classify-local`, `classify-default`,
-  `classify-arbiter`) rather than hardcoding a vendor or model anywhere in its own code —
-  which vendor answers, and its failover chain, is entirely air-llm's decision.
+- **air-model-gateway** — the only path to any model, local or cloud. Each rung asks for a
+  model class (`local` for Tier 2 and the summary, `auto` for Tier 3, `cloud` for the
+  arbiter) rather than naming a vendor or model anywhere in this service's code. The
+  gateway's `deploy/routing.yaml` (`overrides.air-classifier-service`) decides which models
+  serve each class and in what failover order.
 - **air-client** — the Streamlit console used to exercise and demo this API (and every
   other AIR service) by hand.
 
@@ -58,15 +59,15 @@ exercised in tests with four fakes and no network.
 1. **Cheapest sufficient answer.** Escalate only when the policy — not a person, not a
    hardcoded rule — decides the current answer isn't good enough.
 2. **Contracts are Pydantic, all the way down.** Request, response, verdict, and even the
-   provider wire payload to air-llm are Pydantic v2 models. OpenAPI and validation are
+   provider wire payload to the gateway are Pydantic v2 models. OpenAPI and validation are
    *derived* from them, never hand-maintained in parallel.
 3. **Degrade, don't fail.** A tier failing, or the ladder wanting to climb and finding
    nothing available, returns the best verdict any tier produced, with `degraded: true` and
    a specific reason — never a silent wrong answer, and a 5xx only when *no* tier produced
    anything at all.
-4. **This service decides *whether* to escalate and *how much* to spend; air-llm decides
-   *who answers*.** No vendor name, model family, or provider SDK appears anywhere in this
-   codebase's logic — only in routing-alias names it owns and in scripted test fixtures.
+4. **This service decides *whether* to escalate and *how much* to spend; the gateway
+   decides *who answers*.** No vendor name, model family, or provider SDK appears anywhere in
+   this codebase's logic — only the model classes it asks for, and scripted test fixtures.
 5. **Resilience is per-dependency, not global.** A circuit breaker and bulkhead guard each
    remote call independently, so one dependency being down degrades exactly the tiers that
    need it and nothing else.
@@ -79,13 +80,13 @@ exercised in tests with four fakes and no network.
 | Orchestration | `Orchestrator` runs the ladder; `EscalationPolicy` is a pure, fully-tested rule table (11 rules) deciding stop-vs-climb after every tier |
 | Tier 0 | Deterministic rules + lexicon shortcuts |
 | Tier 1 | Zero-shot NLI ONNX classifier (INT8, per-channel quantized) blended with the lexicon; falls back to lexicon-only if the artifact isn't mounted |
-| Tier 2 / 3 | One `AirLlmProvider` adapter, one call — `POST /v1/inference` on air-llm; Tier 3 additionally arbitrates to a stronger model when confidence is still low |
-| Summary refresh | `/v1/summary/refresh` — stateless: classifies new items via the same ladder, merges a rollup, refreshes a narrative through a separately-guarded air-llm call that degrades (never fails) on its own |
+| Tier 2 / 3 | One `ModelGatewayProvider` adapter, one call — `POST /v1/generate` on air-model-gateway, asking for a model class; Tier 3 additionally arbitrates to a stronger model when confidence is still low |
+| Summary refresh | `/v1/summary/refresh` — stateless: classifies new items via the same ladder, merges a rollup, refreshes a narrative through a separately-guarded gateway call that degrades (never fails) on its own |
 | Audit log | Optional, off by default: MongoDB-backed, TTL-expiring record of classification jobs for support review — fire-and-forget, never affects a response (`audit/`) |
 | Resilience | Timeout + circuit breaker + bulkhead per remote dependency (`resilience/`) |
-| Observability | `structlog` JSON logs, OpenTelemetry traces, Prometheus metrics, cost attribution straight from air-llm's own reported `cost_usd` (no local price table) |
+| Observability | `structlog` JSON logs, OpenTelemetry traces, Prometheus metrics, cost attribution straight from the gateway's own reported `cost_usd` (no local price table) |
 | Config | `pydantic-settings`, 12-factor via env vars, every key documented in `.env.example` |
-| Tests | Unit (policy truth table, each module behind fakes) → tier fakes (orchestrator wiring, no network) → contract (OpenAPI + golden fixtures) → provider (scripted air-llm contract) → integration (`tests/integration/`, real internal wiring, no external services required) |
+| Tests | Unit (policy truth table, each module behind fakes) → tier fakes (orchestrator wiring, no network) → contract (OpenAPI + golden fixtures) → provider (scripted gateway contract) → integration (`tests/integration/`, real internal wiring, no external services required) |
 
 Full endpoint/config/testing reference: [02-lld.md](02-lld.md).
 
@@ -95,7 +96,7 @@ This story is strongest performed live, in this order — it was run end-to-end 
 during final review and every transition below was verified with **zero restarts** of
 air-classifier-service itself:
 
-1. **Start clean.** `make up` here, plus air-infra and air-llm up. `bash scripts/doctor.sh`
+1. **Start clean.** `make up` here, plus air-infra and air-model-gateway up. `bash scripts/doctor.sh`
    confirms everything is reachable before you start talking.
 2. **The ladder, cheap to expensive** — either via `bash scripts/demo-tiers.sh` (scripted,
    narrated output) or by hand through air-client's classifier tab (its tier-probe buttons
@@ -109,13 +110,13 @@ air-classifier-service itself:
      → escalates to **T3** for arbitration — damning praise a cheaper model reads as
      positive.
 3. **The resilience story — the part worth building the demo around.** Stop air-infra and
-   air-llm entirely (air-classifier-service keeps running — it has no `depends_on` on either).
+   air-model-gateway entirely (air-classifier-service keeps running — it has no `depends_on` on either).
    Re-run the sarcasm case: T0/T1 still answer instantly; the natural (unpinned) request
    climbs, finds nothing above T1, and returns `200` with `degraded: true` and
    `escalated_because: "next_tier_unavailable"` — not a 503, not a hang. Show
-   `/v1/ready`: `degraded`, each down component naming *why* (`"air-llm unreachable at
+   `/v1/ready`: `degraded`, each down component naming *why* (`"air-model-gateway unreachable at
    ...: ConnectError"`), not a bare "unavailable." Then bring air-infra up (cache recovers
-   on the next request, no restart), then air-llm (T2/T3 clear on the next request, no
+   on the next request, no restart), then air-model-gateway (T2/T3 clear on the next request, no
    restart). This is the actual engineering the rest of the ladder demo doesn't show.
 4. **Introspection.** `/v1/capabilities` for what's configured and live per tier;
    `/metrics` for the Prometheus catalogue; `docker logs -f` filtered to `tier.decision` /
@@ -130,9 +131,9 @@ explicitly called out as unbuilt in `00-plan.md`:
 | --- | --- | --- |
 | Accuracy-evaluation harness is a starting set, not a complete one | `evals/golden_set.jsonl` (48 entries) plus `tests/eval/` now runs in the build and directionally checks calibration (`make test-eval`) — this was fully unbuilt before; what is still missing is scale (the "100-200" a real programme wants), true per-class confusion matrices, and drift tracking across model/prompt updates over time, not just a pass/fail at one point in time | Grow the set as real production misclassifications are found; add a confusion-matrix report, not just pass/fail |
 | T1/T3 per-tier timeouts are local-dev stopgaps, not calibrated defaults | `.env` currently overrides both above their `config.py` defaults, with comments explaining *why* (CPU contention from a concurrently-running local model; a schema-repair round-trip against whichever cloud provider is live occasionally exceeding 8s) — real, reproduced live, but tuned for one developer's machine under one specific load pattern | Re-measure on production-shaped hardware; treat the current `.env` values as a starting point, not a verified default |
-| air-classifier's air-llm routing aliases can silently drift | `classify-local`/`classify-default`/`classify-arbiter` live in **air-llm's** `deploy/routing.yaml`, a separate repo, edited by hand. Nothing enforces the two stay in sync | A contract/smoke test that asserts all three aliases resolve at boot, or a shared fixture between the two repos |
+| The gateway's per-service routing override can silently drift | The class names themselves are validated at startup, but what each class *means* for this service lives in **air-model-gateway's** `deploy/routing.yaml` (`overrides.air-classifier-service`), a separate repo. Without that override, `local` falls back to the global 3-rung local chain (Tier 2 no longer fails cleanly when its model is down) and `cloud` to the global cheap chain (arbitration would ask the same tier of model again). Nothing here detects that | A boot-time or smoke check against the gateway's `GET /v1/capabilities`, asserting `local` is one rung and `cloud` leads with a stronger model than `auto` |
 | Injection defence is tested at the prompt-construction level only | `tests/unit/test_prompts.py` proves the caller's text always lands inside the fences and that a fence-spoofing attempt is logged (`prompt.fence_marker_in_input`) — it cannot prove a real model won't be fooled by adversarial phrasing that *doesn't* try to spoof the fence itself | A live/recorded-cassette red-team pass against the real provider, not just the prompt-construction code |
-| The remaining-budget header to air-llm is one-sided | `AirLlmProvider` sends `X-Remaining-Budget-Ms` on every call now, but it only has value once air-llm's own side reads it and stops early | Confirm with the air-llm owner whether/when their side will honor it |
+| The remaining-budget header to the gateway is one-sided | `ModelGatewayProvider` sends `X-Remaining-Budget-Ms` on every call, but air-model-gateway does not read it today; it only has value once the gateway uses it as the call's deadline | Raise with the air-model-gateway owners (their `docs/00-plan.md` §6 is where future work is tracked) |
 | No multi-tenant concept | Metrics, cost, and quotas are per-API-key, not per-tenant | Add a tenant dimension if/when a consumer needs isolated cost or quota reporting |
 | No integrity/abuse/spam-style heads | Only sentiment/tone/urgency/intent/aspects today | Would be a genuinely new taxonomy dimension, not an incremental addition — see roadmap |
 | Docker Compose only | No Kubernetes manifests, no HPA, no NetworkPolicy | Real gap only if/when a cluster rollout is actually next |
@@ -172,7 +173,7 @@ pointer, not duplicated:
   `/v1/capabilities`) exists specifically so an operator never has to read this service's
   own logs to find out *why* a tier is down — extend it rather than routing around it if a
   new failure mode needs surfacing.
-- Every provider-facing contract (air-llm's request/response, this service's own request/
+- Every provider-facing contract (the gateway's request/response, this service's own request/
   response/verdict) is a Pydantic model on purpose — if you find yourself reaching for a
   raw `dict[str, Any]` at a service boundary, that's very likely a gap to close, not a
   shortcut to take.

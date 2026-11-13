@@ -1,4 +1,4 @@
-"""AirLlmProvider — the thin client over air-model-gateway's ``/v1/generate``.
+"""ModelGatewayProvider — the thin client over air-model-gateway's ``/v1/generate``.
 
 Every test runs against a mocked transport; the base URL points at the
 gateway's default local address and no real service is contacted.
@@ -14,9 +14,8 @@ import pytest
 import respx
 from pydantic import BaseModel, SecretStr
 
-from air_classifier_service.config import AirLlmSettings, Settings
+from air_classifier_service.config import ModelGatewaySettings, Settings
 from air_classifier_service.constants import ModelClass, Provider
-from air_classifier_service.providers.air_llm_provider import AirLlmProvider
 from air_classifier_service.providers.base import (
     ProviderBudgetExceededError,
     ProviderRateLimitError,
@@ -25,6 +24,7 @@ from air_classifier_service.providers.base import (
     ProviderSchemaError,
     ProviderUnavailableError,
 )
+from air_classifier_service.providers.model_gateway_provider import ModelGatewayProvider
 
 GENERATE_URL = "http://localhost:8083/v1/generate"
 READY_URL = "http://localhost:8083/v1/ready"
@@ -56,12 +56,14 @@ class _Out(BaseModel):
 
 def _settings(*, enabled: bool = True, key: str | None = "gateway-token") -> Settings:
     return Settings(
-        air_llm=AirLlmSettings(enabled=enabled, token=SecretStr(key) if key is not None else None)
+        model_gateway=ModelGatewaySettings(
+            enabled=enabled, token=SecretStr(key) if key is not None else None
+        )
     )
 
 
-def _provider(name: Provider = Provider.ANTHROPIC, **kw: Any) -> AirLlmProvider:
-    return AirLlmProvider(_settings(**kw), name)
+def _provider(name: Provider = Provider.ANTHROPIC, **kw: Any) -> ModelGatewayProvider:
+    return ModelGatewayProvider(_settings(**kw), name)
 
 
 def _body(**over: Any) -> dict[str, Any]:
@@ -98,7 +100,7 @@ def _problem(status: int, code: str, **extra: Any) -> httpx.Response:
 
 
 async def _classify(
-    provider: AirLlmProvider,
+    provider: ModelGatewayProvider,
     *,
     model: ModelClass = ModelClass.AUTO,
     remaining_ms: float | None = None,
@@ -364,12 +366,12 @@ async def test_classify_unconfigured_is_unavailable() -> None:
         await _classify(provider)
 
 
-def test_air_llm_mode_wires_the_ladder() -> None:
+def test_model_gateway_mode_wires_the_ladder() -> None:
     from air_classifier_service.main import build_ladder
 
     ladder = build_ladder(_settings(enabled=True))
     assert ladder.providers  # T2 local + T3 cloud, both gateway-backed
-    assert all(isinstance(p, AirLlmProvider) for p in ladder.providers)
+    assert all(isinstance(p, ModelGatewayProvider) for p in ladder.providers)
 
 
 def test_both_llm_tiers_self_build_a_bulkhead_when_none_is_passed() -> None:
@@ -397,7 +399,7 @@ def test_both_llm_tiers_self_build_a_bulkhead_when_none_is_passed() -> None:
     assert t3_bulkhead.limit == settings.resilience.llm_concurrency
 
 
-def test_disabled_air_llm_builds_no_llm_tiers() -> None:
+def test_disabled_model_gateway_builds_no_llm_tiers() -> None:
     from air_classifier_service.constants import Tier as TierId
     from air_classifier_service.main import build_ladder
 
@@ -421,7 +423,7 @@ async def test_health_reads_overall_readiness_not_a_per_vendor_probe() -> None:
 
 
 @respx.mock
-async def test_health_is_false_when_air_llm_reports_not_ready() -> None:
+async def test_health_is_false_when_model_gateway_reports_not_ready() -> None:
     respx.get(READY_URL).mock(
         return_value=httpx.Response(503, json={"status": "degraded", "providers": {}})
     )
@@ -473,4 +475,6 @@ async def test_health_detail_clears_on_a_later_success() -> None:
 async def test_health_is_false_when_unconfigured() -> None:
     provider = _provider(enabled=False)
     assert await provider.health() is False
-    assert provider.health_detail == "not configured (AIR_LLM__ENABLED / AIR_LLM__TOKEN)"
+    assert (
+        provider.health_detail == "not configured (MODEL_GATEWAY__ENABLED / MODEL_GATEWAY__TOKEN)"
+    )

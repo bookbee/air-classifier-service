@@ -18,7 +18,7 @@ touches, and each answers a different question:
   Notably which Tier-1 scorer backend is live, since a missing ONNX artifact
   degrades answer quality silently and is otherwise invisible from outside.
   Unlike its two siblings above, this is operator detail rather than a
-  load-balancer boolean — it discloses configured model/alias names and
+  load-balancer boolean — it discloses configured model classes and
   per-tier availability — so it is authenticated and rate-limited exactly like
   ``/v1/classify``, not open the way a liveness probe has to be.
 * ``/metrics`` — the Prometheus exposition, mounted outside ``/v1`` and outside
@@ -100,15 +100,15 @@ STATUS_NOT_READY: Final[str] = "not_ready"
 #: instead of by answering, which loses the degraded/not-ready distinction this
 #: endpoint exists to draw. Set the kubelet timeout comfortably above this.
 #:
-#: 1.0s until the air-llm cutover, when it was still sized for T2/T3's own
-#: direct-SDK or same-host provider calls. Reaching air-llm over
+#: 1.0s until the air-model-gateway cutover, when it was still sized for T2/T3's own
+#: direct-SDK or same-host provider calls. Reaching air-model-gateway over
 #: `host.docker.internal` (docker-compose.yml) is a real extra hop, not a
 #: same-process call, and measured 1.2-1.5s round trip on Docker Desktop —
-#: the *network*, not air-llm being slow or unhealthy. The old ceiling made
+#: the *network*, not air-model-gateway being slow or unhealthy. The old ceiling made
 #: T2/T3 report `available: false` on a perfectly healthy deployment; this one
 #: clears the measured max with the same ~2x-headroom margin every other
 #: measured timeout in this service uses (docs/02-lld.md's changelog), and
-#: comfortably exceeds AirLlmProvider's own `_HEALTH_TIMEOUT_S` (2.0s) so that
+#: comfortably exceeds ModelGatewayProvider's own `_HEALTH_TIMEOUT_S` (2.0s) so that
 #: timeout gets to be the one that actually fires.
 _PROBE_TIMEOUT_S: Final[float] = 3.0
 
@@ -345,7 +345,7 @@ async def capabilities(
     missing from the list and indistinguishable from one that failed to load.
 
     Authenticated and rate-limited, unlike its two siblings above: it discloses
-    configured model/alias names, which Tier-1 scorer backend actually loaded,
+    configured model classes, which Tier-1 scorer backend actually loaded,
     and per-tier availability — real deployment detail, not the liveness/
     readiness boolean a load balancer or kubelet needs to probe without
     credentials. `key` is otherwise unused here; the dependency's job is the

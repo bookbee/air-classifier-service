@@ -89,28 +89,28 @@ def test_overriding_one_rung_leaves_the_others_untouched(
     assert tiers.t0_rules.timeout_ms == 5
 
 
-def test_overriding_one_air_llm_key_preserves_the_others(
+def test_overriding_one_model_gateway_key_preserves_the_others(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same hazard on the air_llm block, where a reset model id is silent."""
-    monkeypatch.setenv("AIR_CLASSIFIER__AIR_LLM__TIMEOUT_S", "45")
-    air_llm = Settings().air_llm
-    assert air_llm.timeout_s == 45.0
-    assert air_llm.cloud_model == "auto"
-    assert air_llm.max_tokens == 2048
-    assert air_llm.summary_model == "local"
-    assert air_llm.summary_max_tokens == 512
+    """The same hazard on the model_gateway block, where a reset model id is silent."""
+    monkeypatch.setenv("AIR_CLASSIFIER__MODEL_GATEWAY__TIMEOUT_S", "45")
+    model_gateway = Settings().model_gateway
+    assert model_gateway.timeout_s == 45.0
+    assert model_gateway.cloud_model == "auto"
+    assert model_gateway.max_tokens == 2048
+    assert model_gateway.summary_model == "local"
+    assert model_gateway.summary_max_tokens == 512
 
 
 def test_overriding_the_summary_model_preserves_its_siblings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("AIR_CLASSIFIER__AIR_LLM__SUMMARY_MODEL", "cloud")
-    air_llm = Settings().air_llm
-    assert air_llm.summary_model == "cloud"
-    assert air_llm.summary_max_tokens == 512
-    assert air_llm.summary_timeout_s == 10.0
-    assert air_llm.cloud_model == "auto"
+    monkeypatch.setenv("AIR_CLASSIFIER__MODEL_GATEWAY__SUMMARY_MODEL", "cloud")
+    model_gateway = Settings().model_gateway
+    assert model_gateway.summary_model == "cloud"
+    assert model_gateway.summary_max_tokens == 512
+    assert model_gateway.summary_timeout_s == 10.0
+    assert model_gateway.cloud_model == "auto"
 
 
 def test_overriding_one_audit_key_preserves_the_others(

@@ -16,31 +16,31 @@ BASE="${BASE:-http://127.0.0.1:8082}"
 KEY="${KEY:-airc_local_dev_key}"
 only="${1:-all}"
 
-# air-llm's own address, not this service's — T2 goes through it now, and
+# air-model-gateway's own address, not this service's — T2 goes through it now, and
 # whichever local runtime currently answers the `local` class has its own
 # eviction window between calls (minutes, not hours) after which the *next*
 # T2 call pays a full cold model load on top of real generation time, which
 # routinely exceeds TIERS__T2_LOCAL_LLM__TIMEOUT_MS (6s default) — that
 # failure is a stale model cache, not a broken tier. Warmed once here, every
 # T2 case below stays warm for the rest of this run.
-AIR_LLM_BASE="${AIR_LLM_BASE:-http://127.0.0.1:8083}"
-AIR_LLM_TOKEN="${AIR_LLM_TOKEN:-air-classifier-dev}"
-AIR_LLM_LOCAL_MODEL="${AIR_LLM_LOCAL_MODEL:-local}"
+MODEL_GATEWAY_BASE="${MODEL_GATEWAY_BASE:-http://127.0.0.1:8083}"
+MODEL_GATEWAY_TOKEN="${MODEL_GATEWAY_TOKEN:-air-classifier-dev}"
+MODEL_GATEWAY_LOCAL_MODEL="${MODEL_GATEWAY_LOCAL_MODEL:-local}"
 
 warm_local_llm() {
   # cache:false: the gateway caches identical requests per service, and a
   # cached "hi" would return instantly without ever loading the model.
-  printf '\n\033[2mwarming %s via air-llm…\033[0m' "$AIR_LLM_LOCAL_MODEL"
+  printf '\n\033[2mwarming %s via air-model-gateway…\033[0m' "$MODEL_GATEWAY_LOCAL_MODEL"
   started=$(date +%s%N)
-  curl -s -m 60 -X POST "$AIR_LLM_BASE/v1/generate" \
-    -H "X-API-Key: $AIR_LLM_TOKEN" -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$AIR_LLM_LOCAL_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8,\"cache\":false}" \
+  curl -s -m 60 -X POST "$MODEL_GATEWAY_BASE/v1/generate" \
+    -H "X-API-Key: $MODEL_GATEWAY_TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"model\":\"$MODEL_GATEWAY_LOCAL_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8,\"cache\":false}" \
     -o /dev/null -w '%{http_code}' | { read -r code
       elapsed_ms=$(( ($(date +%s%N) - started) / 1000000 ))
       if [ "$code" = "200" ]; then
         printf ' done (%sms)\n' "$elapsed_ms"
       else
-        printf ' HTTP %s — air-llm unreachable or the model is not pulled; T2 cases below will 503\n' "$code"
+        printf ' HTTP %s — air-model-gateway unreachable or the model is not pulled; T2 cases below will 503\n' "$code"
       fi
     }
 }
@@ -105,9 +105,9 @@ if want t2; then
 fi
 
 # ── T3 · cloud LLM ───────────────────────────────────────────────────────────
-# Needs air-llm reachable with a cloud key configured on its side. Without one
+# Needs air-model-gateway reachable with a cloud key configured on its side. Without one
 # the tier is skipped at startup and a pinned request 503s — see the README on
-# configuring AIR_LLM__BASE_URL / AIR_LLM__TOKEN.
+# configuring MODEL_GATEWAY__BASE_URL / MODEL_GATEWAY__TOKEN.
 if want t3; then
   echo; echo "════ T3 · cloud LLM only ════"
   run "T3-a subtle irony"   classify '{"text":"Well, at least the box it arrived in was sturdy.","options":{"min_tier":"t3_cloud_llm","max_tier":"t3_cloud_llm"}}'

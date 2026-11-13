@@ -69,7 +69,7 @@ logger = get_logger(__name__)
 #: no `air_classifier_breaker_state` gauge visibility for this path
 #: specifically (`resilience/breaker.py::_publish_state` skips names it can't
 #: parse as a `Provider`).
-_DEPENDENCY_NAME: Final[str] = "air_llm_summary"
+_DEPENDENCY_NAME: Final[str] = "model_gateway_summary"
 
 #: Items with no `occurred_at` sort after every dated one, and (fixed rather
 #: than `None`) never compare two absent timestamps to each other, which
@@ -188,7 +188,7 @@ class SummaryService:
 
     async def _call(self, system: str, user: str, *, request_id: str) -> ProviderResult:
         assert self._provider is not None  # narrowed by _refresh_narrative's own check
-        timeout_s = self._settings.air_llm.summary_timeout_s
+        timeout_s = self._settings.model_gateway.summary_timeout_s
         return await guarded(
             self._provider.classify,
             timeout_s=timeout_s,
@@ -197,8 +197,8 @@ class SummaryService:
             system_prompt=system,
             user_content=user,
             output_model=LLMSummaryOutput,
-            model=self._settings.air_llm.summary_model,
-            max_tokens=self._settings.air_llm.summary_max_tokens,
+            model=self._settings.model_gateway.summary_model,
+            max_tokens=self._settings.model_gateway.summary_max_tokens,
             cache_prefix=True,
             remaining_ms=timeout_s * 1000.0,
             request_id=request_id,

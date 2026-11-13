@@ -13,7 +13,7 @@ Two instances exist, one per rung, labelled ``Provider.OLLAMA`` for Tier 2 and
 rung's breaker and bulkhead and is the fallback attribution if a response
 doesn't say who answered. What is actually asked for is ``model``, a
 :class:`~air_classifier_service.constants.ModelClass`, and which class a rung
-asks for is that rung's decision (``config.py``'s ``AirLlmSettings``), not
+asks for is that rung's decision (``config.py``'s ``ModelGatewaySettings``), not
 this adapter's.
 
 **Errors are sorted by what the ladder should do about them**, because the
@@ -160,12 +160,12 @@ class _GenerateResponse(BaseModel):
         return value
 
 
-class AirLlmProvider:
+class ModelGatewayProvider:
     """:class:`LLMProvider` backed by air-model-gateway's ``/v1/generate``."""
 
     def __init__(self, settings: Settings, name: Provider) -> None:
         self.name = name
-        self._config = settings.air_llm
+        self._config = settings.model_gateway
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._closed = False
@@ -199,7 +199,9 @@ class AirLlmProvider:
         :class:`ProviderRequestError`), not here.
         """
         if not self.configured:
-            self._last_health_detail = "not configured (AIR_LLM__ENABLED / AIR_LLM__TOKEN)"
+            self._last_health_detail = (
+                "not configured (MODEL_GATEWAY__ENABLED / MODEL_GATEWAY__TOKEN)"
+            )
             return False
         try:
             client = await self._ready_client()

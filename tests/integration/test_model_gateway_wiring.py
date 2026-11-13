@@ -26,9 +26,9 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from air_classifier_service.config import (
-    AirLlmSettings,
     AppSettings,
     CacheSettings,
+    ModelGatewaySettings,
     SecuritySettings,
     Settings,
 )
@@ -109,7 +109,7 @@ def _settings() -> Settings:
     ]
     return Settings(
         app=AppSettings(env="test"),
-        air_llm=AirLlmSettings(enabled=True, token=SecretStr("test-token")),
+        model_gateway=ModelGatewaySettings(enabled=True, token=SecretStr("test-token")),
         cache=CacheSettings(backend="memory"),
         security=SecuritySettings(api_keys_inline=json.dumps(keys), hash_salt=SecretStr(_SALT)),
     )

@@ -210,7 +210,7 @@ class NoVerdictAvailableError(AppError):
     status = 503
     # By construction (see the module docstring) this is never a defect in this
     # service — every enabled tier failed or abstained, almost always because a
-    # dependency (air-llm, a cloud provider) was down or slow. That can clear on
+    # dependency (air-model-gateway, a cloud provider) was down or slow. That can clear on
     # its own, which is exactly what "retryable" is for.
     retryable = True
 

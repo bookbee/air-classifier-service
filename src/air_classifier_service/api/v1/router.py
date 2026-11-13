@@ -73,7 +73,7 @@ def get_summary_service(state: AppStateDep) -> SummaryService:
     owns its own bulkhead/breaker (`pipeline/summary_service.py`), which must
     be shared across calls to mean anything. `main.py`'s lifespan always
     constructs one — the narrative-refresh call inside it degrades on its own
-    when air-llm is not configured, so there is no "not configured" 503 here.
+    when air-model-gateway is not configured, so there is no "not configured" 503 here.
     """
     assert state.summary_service is not None, (
         "AppState.summary_service is None; the application lifespan did not run"

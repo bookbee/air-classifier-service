@@ -8,12 +8,12 @@ byte-identical on every call forever. One prefix means one cache entry and the
 highest achievable hit rate. It is also deliberately long — whichever provider
 currently answers Tier 3's default call will not cache a prefix below its own
 per-model minimum (4096 tokens measured against the provider behind
-``air_llm.cloud_model``'s default rung; 1024 against the one behind
+``model_gateway.cloud_model``'s default rung; 1024 against the one behind
 ``arbiter_model``'s), and *below that minimum nothing errors*: the cache
 silently never fills and every call pays full input price. A rich rubric that
 clears the floor is cheaper than a terse one that does not, because from the
 second request onward the cached portion bills at roughly a tenth of the
-input rate. Which specific provider that is, and its exact floor, is air-llm's
+input rate. Which specific provider that is, and its exact floor, is air-model-gateway's
 routing to decide and re-measure — the number here is current, not a promise.
 
 Everything request-specific — the text, the caller's optional fields, what the
@@ -77,7 +77,7 @@ SYSTEM_COMPACT_PROMPT_VERSION: Final[str] = _version_of(_SYSTEM_COMPACT_PROMPT)
 _CHARS_PER_TOKEN: Final[float] = 3.7
 
 #: Minimum cacheable prefix on the provider currently behind
-#: `air_llm.cloud_model`'s default rung. A shorter system prompt disables
+#: `model_gateway.cloud_model`'s default rung. A shorter system prompt disables
 #: prompt caching outright — silently.
 CLOUD_MIN_CACHEABLE_TOKENS: Final[int] = 4096
 
@@ -157,13 +157,13 @@ def compact_system_prompt() -> str:
     amortise the cost against, so every one of those tokens is re-processed
     on every call.
 
-    Measured against the model `air_llm.local_model` resolved to at the time,
+    Measured against the model `model_gateway.local_model` resolved to at the time,
     the full prefix took ~9.9s against ~1.5s for a short one — roughly 2.5x
     the entire Tier-2 timeout budget, spent re-reading a rubric the model
     cannot remember between calls. Worse, the full prefix was over twice the
     context window that local runtime was configured with, so it was being
     silently truncated: we paid the latency *and* lost the guidance. That
-    context-window knob now lives in air-llm's own configuration, not this
+    context-window knob now lives in air-model-gateway's own configuration, not this
     service's — but the prompt-size lesson still applies to whatever runs
     behind Tier 2's ``local_model``, so the short prompt stays.
 

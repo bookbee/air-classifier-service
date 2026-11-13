@@ -390,7 +390,7 @@ async def test_two_schema_failures_degrade_and_keep_the_prior_narrative() -> Non
 
 
 async def test_provider_unavailable_degrades() -> None:
-    provider = StubProvider(ProviderUnavailableError("air-llm down"))
+    provider = StubProvider(ProviderUnavailableError("air-model-gateway down"))
     service = _service([TEXT_A], provider)
     request = SummaryRefreshRequest(customer_id="cust_1", items=[_item(TEXT_A)])
 

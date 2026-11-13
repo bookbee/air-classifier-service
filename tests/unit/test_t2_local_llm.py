@@ -19,8 +19,8 @@ from typing import Any
 import pytest
 
 from air_classifier_service.config import (
-    AirLlmSettings,
     AppSettings,
+    ModelGatewaySettings,
     Settings,
     TierSettings,
     TiersSettings,
@@ -132,7 +132,7 @@ def _settings(*, timeout_ms: int = 4000, model: ModelClass = ModelClass.LOCAL) -
     return Settings(
         app=AppSettings(env="test"),
         tiers=TiersSettings(t2_local_llm=TierSettings(timeout_ms=timeout_ms)),
-        air_llm=AirLlmSettings(local_model=model),
+        model_gateway=ModelGatewaySettings(local_model=model),
     )
 
 
@@ -197,7 +197,7 @@ async def test_analyse_converts_the_model_output_into_a_verdict() -> None:
     assert verdict.result.label is Label.NEGATIVE
     assert verdict.result.confidence == pytest.approx(0.81)
     assert verdict.is_usable is True
-    # The resolved provider:model, not the tier's configured alias — the same
+    # The resolved provider:model, not the tier's configured class — the same
     # shape Tier 3 reports, so a caller can always see who actually answered.
     assert verdict.model_version == "ollama:llama3.2:3b"
     assert verdict.emotions[0].name == "annoyance"
@@ -428,11 +428,11 @@ async def test_unavailable_reason_is_none_when_available() -> None:
     assert await _tier(StubProvider(healthy=True)).unavailable_reason() is None
 
 
-async def test_unavailable_reason_names_air_llm_not_the_vendor_label() -> None:
-    """`configured` is an air-llm-level check, not a per-vendor one — the
+async def test_unavailable_reason_names_model_gateway_not_the_vendor_label() -> None:
+    """`configured` is a gateway-level check, not a per-vendor one — the
     message must not send an operator looking for a vendor-specific knob."""
     reason = await _tier(StubProvider(configured=False)).unavailable_reason()
-    assert reason == "air-llm not configured"
+    assert reason == "air-model-gateway not configured"
 
 
 async def test_unavailable_reason_names_the_open_breaker_before_probing_health() -> None:

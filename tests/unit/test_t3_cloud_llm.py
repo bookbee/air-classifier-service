@@ -7,7 +7,7 @@ refusal, an outage, or a model that cannot follow the schema must all leave this
 tier as a ``TierError`` so the ladder falls back to a cheaper rung.
 
 This rung talks to a single scripted provider now, not a registry choosing among
-several — cross-vendor failover moved to air-llm's own routing alias. What is
+several — cross-vendor failover is air-model-gateway's, behind a model class. What is
 still this rung's own behaviour, and what these tests pin, is *whether* to ask
 for a second opinion, never *who* answers the first one.
 """
@@ -20,7 +20,12 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, SecretStr, ValidationError
 
-from air_classifier_service.config import AirLlmSettings, AppSettings, ResilienceSettings, Settings
+from air_classifier_service.config import (
+    AppSettings,
+    ModelGatewaySettings,
+    ResilienceSettings,
+    Settings,
+)
 from air_classifier_service.constants import Label, ModelClass, Provider
 from air_classifier_service.pipeline.features import extract_features
 from air_classifier_service.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
@@ -135,16 +140,16 @@ def _result(
     )
 
 
-def _settings(**air_llm: Any) -> Settings:
+def _settings(**model_gateway: Any) -> Settings:
     fields: dict[str, Any] = {
         "token": SecretStr("test-token"),
         "cloud_model": PRIMARY,
         "arbiter_model": ARBITER,
     }
-    fields.update(air_llm)
+    fields.update(model_gateway)
     return Settings(
         app=AppSettings(env="test"),
-        air_llm=AirLlmSettings(**fields),
+        model_gateway=ModelGatewaySettings(**fields),
     )
 
 
@@ -174,9 +179,9 @@ def _tier(
     breaker: CircuitBreaker | None = None,
     bulkhead: Bulkhead | None = None,
     healthy: bool = True,
-    **air_llm: Any,
+    **model_gateway: Any,
 ) -> tuple[CloudLLMTier, _ScriptedProvider]:
-    settings = _settings(**air_llm)
+    settings = _settings(**model_gateway)
     provider = _ScriptedProvider(outcomes, healthy=healthy)
     tier = CloudLLMTier(
         settings,
@@ -501,7 +506,7 @@ async def test_the_default_bulkhead_is_self_built_and_actually_bounds_concurrenc
     """
     settings = Settings(
         app=AppSettings(env="test"),
-        air_llm=AirLlmSettings(token=SecretStr("test-token")),
+        model_gateway=ModelGatewaySettings(token=SecretStr("test-token")),
         resilience=ResilienceSettings(llm_concurrency=1, bulkhead_acquire_timeout_s=0.02),
     )
     provider = _ScriptedProvider([_result(confidence=0.9)])
@@ -529,4 +534,4 @@ def test_a_retired_alias_or_model_name_is_a_startup_error(retired: str) -> None:
     """The gateway answers these with 422 on every call; caught here instead,
     at config load, where it can't masquerade as a degraded ladder."""
     with pytest.raises(ValidationError):
-        AirLlmSettings(cloud_model=retired)  # type: ignore[arg-type]
+        ModelGatewaySettings(cloud_model=retired)  # type: ignore[arg-type]

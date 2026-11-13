@@ -11,7 +11,7 @@ default.
 **A missing dependency is a deployment shape, not a failure.** The escalation
 ladder exists so that a cheaper rung answers when an expensive one cannot, and
 that promise has to hold at *startup* as well as per request: a deployment with
-air-llm entirely unreachable must boot, serve, and report itself honestly on
+air-model-gateway entirely unreachable must boot, serve, and report itself honestly on
 ``/v1/ready`` and ``/v1/capabilities``. So every rung is built
 inside :func:`_tier_guard`, which turns an unconfigured or broken dependency
 into a warning and a shorter ladder. The only thing that can stop this service
@@ -64,8 +64,8 @@ from air_classifier_service.pipeline.tiers.t0_rules import RulesTier
 from air_classifier_service.pipeline.tiers.t1_classifier import ClassifierTier
 from air_classifier_service.pipeline.tiers.t2_local_llm import LocalLLMTier
 from air_classifier_service.pipeline.tiers.t3_cloud_llm import CloudLLMTier
-from air_classifier_service.providers.air_llm_provider import AirLlmProvider
 from air_classifier_service.providers.base import LLMProvider
+from air_classifier_service.providers.model_gateway_provider import ModelGatewayProvider
 from air_classifier_service.security.api_keys import ApiKeyStore
 from air_classifier_service.security.quotas import RateLimiter
 
@@ -136,7 +136,7 @@ class OrjsonResponse(JSONResponse):
 class _TierUnconfiguredError(Exception):
     """A rung's dependency is absent, so the rung is not built.
 
-    Deliberately distinct from a build *failure*: "air-llm is not configured"
+    Deliberately distinct from a build *failure*: "air-model-gateway is not configured"
     is a supported deployment, "the classifier raised while loading" is a
     defect, and an operator reading the boot log needs to tell those two
     apart at a glance.
@@ -165,7 +165,7 @@ def _tier_guard(component: str) -> Iterator[None]:
     """Let one optional component fail to build without taking the service down.
 
     This is the single most important behaviour in this module. Without it, a
-    revoked air-llm token or air-llm itself being unreachable would turn a
+    revoked air-model-gateway token or air-model-gateway itself being unreachable would turn a
     service designed to degrade into one that cannot start — and a crash loop
     at boot is strictly worse than a shorter ladder, because a shorter ladder
     still answers. Named generically rather than after :class:`TierId` because
@@ -216,24 +216,24 @@ def build_ladder(settings: Settings) -> Ladder:
 
     if TierId.T2_LOCAL_LLM in enabled:
         with _tier_guard(TierId.T2_LOCAL_LLM.value):
-            local = AirLlmProvider(settings, Provider.OLLAMA)
+            local = ModelGatewayProvider(settings, Provider.OLLAMA)
             # Constructing the provider does no I/O, so `configured` here means
             # "switched on", not "reachable". Reachability is a readiness
-            # question, and the rung is built either way so that air-llm
+            # question, and the rung is built either way so that air-model-gateway
             # coming up after this service does not need a restart to be used.
             if not local.configured:
-                raise _TierUnconfiguredError("air_llm is disabled in configuration")
+                raise _TierUnconfiguredError("model_gateway is disabled in configuration")
             providers.append(local)
             tiers.append(LocalLLMTier(settings, local))
 
     if TierId.T3_CLOUD_LLM in enabled:
         with _tier_guard(TierId.T3_CLOUD_LLM.value):
-            cloud = AirLlmProvider(settings, Provider.ANTHROPIC)
+            cloud = ModelGatewayProvider(settings, Provider.ANTHROPIC)
             # Appended before the credential check so that shutdown still closes
             # a provider whose HTTP client was built but whose tier was skipped.
             providers.append(cloud)
             if not cloud.configured:
-                raise _TierUnconfiguredError("air_llm is disabled in configuration")
+                raise _TierUnconfiguredError("model_gateway is disabled in configuration")
             tiers.append(CloudLLMTier(settings, cloud))
 
     # Not a ladder rung — the customer-summary narrative refresh
@@ -241,10 +241,10 @@ def build_ladder(settings: Settings) -> Ladder:
     # own instance rather than reusing T3's, so its bulkhead/breaker are keyed
     # independently (see SummaryService) rather than sharing T3's fault state.
     with _tier_guard("summary_refresh"):
-        summary = AirLlmProvider(settings, Provider.ANTHROPIC)
+        summary = ModelGatewayProvider(settings, Provider.ANTHROPIC)
         providers.append(summary)
         if not summary.configured:
-            raise _TierUnconfiguredError("air_llm is disabled in configuration")
+            raise _TierUnconfiguredError("model_gateway is disabled in configuration")
         summary_provider = summary
 
     _log.info(
@@ -253,10 +253,10 @@ def build_ladder(settings: Settings) -> Ladder:
         # Only the ones with credentials — a provider built without any is an
         # implementation detail of the check above. Named `configured`, not
         # `providers` or `available`: `configured` is a no-I/O settings check
-        # (AirLlmProvider.configured's own docstring), not a reachability
+        # (ModelGatewayProvider.configured's own docstring), not a reachability
         # probe, and this line runs once at boot before anything has actually
         # been dialled. Listing it here as if it were verified would read as
-        # "air-llm is available" at exactly the moment nobody has checked —
+        # "air-model-gateway is available" at exactly the moment nobody has checked —
         # `/v1/ready` and `/v1/capabilities` are the honest, continuously
         # re-checked signal for that, not this line.
         configured=[p.name.value for p in providers if p.configured],

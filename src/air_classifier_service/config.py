@@ -4,7 +4,7 @@ Configuration is 12-factor: every value below is settable from the environment
 using the ``AIR_CLASSIFIER__`` prefix and ``__`` as the nesting delimiter, e.g.::
 
     AIR_CLASSIFIER__TIERS__T1__CONFIDENCE_FLOOR=0.85
-    AIR_CLASSIFIER__AIR_LLM__CLOUD_MODEL=auto
+    AIR_CLASSIFIER__MODEL_GATEWAY__CLOUD_MODEL=auto
 
 Escalation thresholds live here rather than in code on purpose: tuning the
 ladder's cost/accuracy balance must never require deploying new logic, only new
@@ -31,7 +31,7 @@ class AppSettings(BaseModel):
     env: Literal["development", "staging", "production", "test"] = "development"
     host: str = "0.0.0.0"  # noqa: S104 — containers bind all interfaces by design
     # 8082 in the AIR port map (air-infra/README.md). Model calls go to
-    # air-llm (its own port, `air_llm.base_url`), not to anything on this map.
+    # air-model-gateway (its own port, `model_gateway.base_url`), not to anything on this map.
     port: int = Field(default=8082, ge=1, le=65535)
     workers: int = Field(default=2, ge=1, le=64)
     root_path: str = ""
@@ -102,10 +102,10 @@ class T1ClassifierSettings(TierSettings):
 class T2LocalLlmSettings(TierSettings):
     """6s, not the 4s the LLD first guessed.
 
-    Measured on the model `air_llm.local_model` currently resolves to, on CPU,
+    Measured on the model `model_gateway.local_model` currently resolves to, on CPU,
     with the compact prompt: p50 1.5s, p90 3.3s. A 4s ceiling left no headroom
     over p90 and lost every cold model load outright. That measurement is
-    specific to today's local model — a different one behind the same alias
+    specific to today's local model — a different one behind the `local` class
     could need this revisited. Note the request-level `latency_budget_ms` is
     usually the binding constraint anyway — the orchestrator takes min(tier
     timeout, remaining budget).
@@ -159,7 +159,7 @@ class TiersSettings(BaseModel):
 # ── Model access ──────────────────────────────────────────────────────────────
 
 
-class AirLlmSettings(BaseModel):
+class ModelGatewaySettings(BaseModel):
     """Every model call — Tier 2, Tier 3 and the summary narrative — goes through
     air-model-gateway's ``POST /v1/generate``.
 
@@ -362,7 +362,7 @@ class Settings(BaseSettings):
 
     app: AppSettings = Field(default_factory=AppSettings)
     tiers: TiersSettings = Field(default_factory=TiersSettings)
-    air_llm: AirLlmSettings = Field(default_factory=AirLlmSettings)
+    model_gateway: ModelGatewaySettings = Field(default_factory=ModelGatewaySettings)
     classifier: ClassifierSettings = Field(default_factory=ClassifierSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
     audit: AuditSettings = Field(default_factory=AuditSettings)

@@ -23,10 +23,10 @@ existing at all is the fix for exactly that class of error, and pretending T1
 gets everything right would make this suite lie about what T1 for.
 
 Two groups only, both CI-safe, no external service: `shortcut`/`clear`/
-`clear_loose`/`ambiguous` pin to T0 or T1 and run with air-llm switched off
-entirely, matching `test_app_boot.py`'s "no Redis, no air-llm" deployment. The
-`live` group needs a reachable air-llm and is marked accordingly — run it with
-`make test-eval-live` once air-llm is up, not on every commit.
+`clear_loose`/`ambiguous` pin to T0 or T1 and run with air-model-gateway switched off
+entirely, matching `test_app_boot.py`'s "no Redis, no air-model-gateway" deployment. The
+`live` group needs a reachable air-model-gateway and is marked accordingly — run it with
+`make test-eval-live` once air-model-gateway is up, not on every commit.
 """
 
 from __future__ import annotations
@@ -43,9 +43,9 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from air_classifier_service.config import (
-    AirLlmSettings,
     AppSettings,
     CacheSettings,
+    ModelGatewaySettings,
     SecuritySettings,
     Settings,
 )
@@ -93,24 +93,24 @@ def _api_keys_inline() -> str:
     )
 
 
-def _settings(*, air_llm_enabled: bool, air_llm_base_url: str | None = None) -> Settings:
-    """No Redis, no air-llm by default — same "awkward on purpose" deployment
+def _settings(*, gateway_enabled: bool, gateway_base_url: str | None = None) -> Settings:
+    """No Redis, no air-model-gateway by default — same "awkward on purpose" deployment
     `test_app_boot.py` uses, so the CI-safe groups never depend on the machine
     running them having anything more than Python installed.
 
-    The token comes from `AIR_LLM_TOKEN`, not `AIR_CLASSIFIER__AIR_LLM__TOKEN`
+    The token comes from `MODEL_GATEWAY_TOKEN`, not `AIR_CLASSIFIER__MODEL_GATEWAY__TOKEN`
     — the latter is stripped by the suite's own hermetic-environment fixture
-    before every test, on purpose, so a real air-llm token is never one
+    before every test, on purpose, so a real air-model-gateway token is never one
     accidentally-exported variable away from leaking into an assertion.
     `demo-tiers.sh` reads the same variable the same way.
     """
-    token = os.environ.get("AIR_LLM_TOKEN", "air-classifier-dev")
+    token = os.environ.get("MODEL_GATEWAY_TOKEN", "air-classifier-dev")
     return Settings(
         app=AppSettings(env="test"),
-        air_llm=AirLlmSettings(
-            enabled=air_llm_enabled,
-            base_url=air_llm_base_url or "http://127.0.0.1:8083",
-            token=SecretStr(token) if air_llm_enabled else None,
+        model_gateway=ModelGatewaySettings(
+            enabled=gateway_enabled,
+            base_url=gateway_base_url or "http://127.0.0.1:8083",
+            token=SecretStr(token) if gateway_enabled else None,
         ),
         cache=CacheSettings(backend="memory"),
         security=SecuritySettings(
@@ -129,15 +129,17 @@ def _client(app: FastAPI) -> Iterator[TestClient]:
 def client() -> Iterator[TestClient]:
     """T0/T1 only — every CI-safe group needs nothing more, and pinning a
     `live` case to a tier this app never built would fail confusingly."""
-    yield from _client(create_app(_settings(air_llm_enabled=False)))
+    yield from _client(create_app(_settings(gateway_enabled=False)))
 
 
 @pytest.fixture(scope="module")
 def live_client() -> Iterator[TestClient]:
-    """The full ladder, against whatever air-llm `AIR_LLM_BASE_URL` names —
+    """The full ladder, against whatever air-model-gateway `MODEL_GATEWAY_BASE_URL` names —
     same override the demo script and doctor.sh already respect."""
-    base_url = os.environ.get("AIR_LLM_BASE_URL", "http://127.0.0.1:8083")
-    yield from _client(create_app(_settings(air_llm_enabled=True, air_llm_base_url=base_url)))
+    base_url = os.environ.get("MODEL_GATEWAY_BASE_URL", "http://127.0.0.1:8083")
+    yield from _client(
+        create_app(_settings(gateway_enabled=True, gateway_base_url=base_url))
+    )
 
 
 def _classify(client: TestClient, entry: dict[str, Any]) -> dict[str, Any] | None:
@@ -226,7 +228,7 @@ def test_confident_cases_score_higher_than_ambiguous_ones(client: TestClient) ->
     )
 
 
-# ── Live: needs a reachable air-llm ──────────────────────────────────────────
+# ── Live: needs a reachable air-model-gateway ──────────────────────────────────────────
 
 
 @pytest.mark.live

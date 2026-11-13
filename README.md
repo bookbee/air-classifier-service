@@ -15,8 +15,8 @@ climbed and why.
 | --- | --- | --- | --- | --- |
 | `t0_rules` | Lexicons, regex, cache | < 1 ms | ~0 | Cache hits, empty text, explicit ratings, emoji-only |
 | `t1_classifier` | Quantised zero-shot NLI encoder + lexicon ensemble | 80–200 ms | ~0 | Clear polarity, conventional phrasing |
-| `t2_local_llm` | air-llm → a local model, schema-constrained (which one is air-llm's own config) | 200 ms – 2 s | ~0 (own hardware) | Mixed sentiment, mild sarcasm, tone/topics/intent |
-| `t3_cloud_llm` | air-llm → a metered cloud model, then arbitration to a stronger one (vendor is air-llm's choice) | 0.8 – 3 s | $ per call | Genuine ambiguity, subtle irony, multilingual edges |
+| `t2_local_llm` | air-model-gateway's `local` class → a local model, schema-constrained (which one is the gateway's routing) | 200 ms – 2 s | ~0 (own hardware) | Mixed sentiment, mild sarcasm, tone/topics/intent |
+| `t3_cloud_llm` | air-model-gateway's `auto` class → a metered cloud model, then arbitration via `cloud` to a stronger one (vendor is the gateway's choice) | 0.8 – 3 s | $ per call | Genuine ambiguity, subtle irony, multilingual edges |
 
 `tone`, `topics` and `intent` need real language understanding no lexicon or classifier head
 can supply, so they are populated only when the ladder reaches an LLM tier (T2 or T3); set
@@ -93,43 +93,56 @@ Cap the ladder per request with `options.max_tier` — `"t2_local_llm"` keeps ev
 your own hardware. A rated or channel-tagged text gets more out of the same call — pass
 `rating`/`rating_scale_max` for `rating_consistency`, or `channel` to sharpen `urgency`.
 
-Without air-llm reachable, both Tiers 2 and 3 stand down and the ladder stops at
+Without air-model-gateway reachable, both Tiers 2 and 3 stand down and the ladder stops at
 `t1_classifier`, trace says `next_tier_unavailable`. Without an ONNX artifact on disk, Tier 1
 runs its lexicon fallback. Both are degradations, not failures.
 
 ## Enabling Tiers 2 and 3
 
 Every model call — local and cloud both — goes through
-[air-llm](../air-llm/README.md), the platform's single model gateway. This service holds
-no provider SDKs and no provider API keys of its own; air-llm owns the credentials, the
-cross-vendor routing and failover, cost accounting and caching. Bring it up once
-(`cd ../air-llm && make up`; see its own README for provider keys and local model runtime setup),
-then point this service at it:
+[air-model-gateway](../air-model-gateway/README.md), the platform's single model gateway, on
+its `POST /v1/generate`. This service holds no provider SDKs and no provider API keys of its
+own; the gateway owns the credentials, cross-vendor routing and failover, cost accounting,
+per-service budgets and caching. Bring it up once (`cd ../air-model-gateway && make run`, or
+`make up` for its container; see its own README for provider keys and the local model
+runtime), then point this service at it:
 
 ```bash
 # in .env, then `make restart`
-AIR_CLASSIFIER__AIR_LLM__BASE_URL=http://127.0.0.1:8083   # host.docker.internal:8083 under compose
-AIR_CLASSIFIER__AIR_LLM__TOKEN=air-classifier-dev          # air-llm's own .env.example provisions this
+AIR_CLASSIFIER__MODEL_GATEWAY__BASE_URL=http://127.0.0.1:8083   # host.docker.internal:8083 under compose
+AIR_CLASSIFIER__MODEL_GATEWAY__TOKEN=air-classifier-dev          # the gateway's own .env.example provisions this
 ```
 
-`/v1/capabilities` reports each rung's live `model_version`, so it is the quickest way to
-confirm the token landed and air-llm is answering.
+`/v1/capabilities` reports each rung's `model_version`, and `/v1/ready` names *why* a rung
+is down, so together they are the quickest way to confirm the gateway is answering.
 
-Which model each rung asks air-llm for is still this service's own decision, but *only* as
-an alias name it owns — never a vendor or model directly. `AIR_LLM__LOCAL_MODEL` (default
-`classify-local`), `AIR_LLM__CLOUD_MODEL` (default `classify-default`) and
-`AIR_LLM__ARBITER_MODEL` (default `classify-arbiter`) are all air-llm routing aliases
-(air-llm's `deploy/routing.yaml`) defined for this service specifically — which concrete
-model or vendor answers behind each one is entirely air-llm's config to change, and this
-service does not need to know or care which. Arbitration means one request can be **two**
-billed calls: the cheap model answers, and below `AIR_LLM__ARBITRATION_FLOOR` (0.65) the
-arbiter model is asked as well. `options.max_cost_usd` (default $0.05) caps a single
-request, and `AIR_LLM__ARBITRATION_ENABLED=false` turns the second call off entirely.
+Each rung asks the gateway for a **model class**, never a model or vendor:
+`MODEL_GATEWAY__LOCAL_MODEL` (Tier 2, default `local`), `MODEL_GATEWAY__CLOUD_MODEL` (Tier 3,
+default `auto`) and `MODEL_GATEWAY__ARBITER_MODEL` (Tier 3's second opinion, default `cloud`).
+Any other value fails validation at startup. Which concrete models serve each class is the
+gateway's `deploy/routing.yaml`, where `overrides.air-classifier-service` tunes the chains
+for this service alone: `local` is a single local rung with no fallback (so a local outage
+fails the call and *this* ladder decides what's next), `auto` is cloud-only at the cheap
+end, and `cloud` holds the strongest models. `GET /v1/capabilities` on the gateway itself
+shows the models behind each class.
 
-`AIR_LLM__SUMMARY_MODEL` (default `summarize-default`) is a fourth alias in the same
-family, asked only by `/v1/summary/refresh`'s narrative step (below) — its own alias
-because a narrative-refresh failure degrades gracefully rather than escalating, so it
-needs no cross-vendor failover chain of its own.
+Arbitration means one request can be **two** billed calls: the cheap model answers, and
+below `MODEL_GATEWAY__ARBITRATION_FLOOR` (0.65) the arbiter is asked as well.
+`options.max_cost_usd` (default $0.05) caps a single request, and
+`MODEL_GATEWAY__ARBITRATION_ENABLED=false` turns the second call off entirely. The gateway
+also enforces a **daily budget per service** (its policy file): once it is spent, Tier 3
+calls fail with `budget_exceeded` until the next UTC day, and the trace records the rung as
+failed with `ProviderBudgetExceededError` rather than as an outage.
+
+A gateway `4xx` other than `429` (an invalid body, a missing grant, a bad token) is treated
+as a configuration bug, not a capacity gap: it is logged at error level and the rung is
+recorded as *failed* in the trace, so a broken integration cannot hide behind
+`degraded: true` answers that look like ordinary fallbacks.
+
+`MODEL_GATEWAY__SUMMARY_MODEL` (default `local`) is asked only by `/v1/summary/refresh`'s
+narrative step (below). It is local, like Tier 2, because a narrative-refresh failure
+degrades gracefully rather than escalating, so there is nothing above it to protect and no
+reason to pay for a cloud model.
 
 ## Customer summary refresh
 
@@ -191,8 +204,8 @@ Two properties worth relying on:
   `/v1/classify/batch` returns, so existing tooling that already parses one parses the
   other. A per-item failure isolates the same way: that item's slot carries a
   `ProblemDetail`, its siblings and the rollup are unaffected.
-- **The narrative step degrades, it never fails the call.** If air-llm (or specifically
-  `AIR_LLM__SUMMARY_MODEL`) is unreachable or unconfigured, the response still comes back
+- **The narrative step degrades, it never fails the call.** If air-model-gateway (or
+  specifically the `MODEL_GATEWAY__SUMMARY_MODEL` class) is unreachable or unconfigured, the response still comes back
   `200` with a freshly computed `rollup`, `degraded: true`, and `narrative` carried over
   unchanged from `existing_summary`. The only way this route ever fails outright is the
   same one `/v1/classify` shares — a batch-size or auth/validation problem, never "the
@@ -212,9 +225,10 @@ unpinned, to watch the ladder actually decide for itself where to stop; `climb` 
 rung to answer and then escalate anyway, so you see all four fire in one request.
 
 Before any section that touches Tier 2, the script fires one throwaway completion straight at
-air-llm for the exact alias Tier 2 will ask for (`classify-local` by default) and waits for
-it to come back. The local runtime that answers today evicts an idle model after 5 minutes
-by default, and air-llm's adapter does not override that, so a gap longer than that between
+air-model-gateway for the class Tier 2 will ask for (`local` by default), with the gateway's
+response cache bypassed, and waits for it to come back. The local runtime that answers today
+evicts an idle model after 5 minutes by default, and the gateway's adapter does not override
+that, so a gap longer than that between
 requests means the *next* real call pays a full cold load on top of generation time — which
 routinely exceeds Tier 2's 6s timeout and reads as a broken tier when it is really just a
 cold cache. The warmup step exists specifically so a demo run doesn't intermittently fail on
@@ -257,19 +271,19 @@ and a bare checkout with nothing configured still boots and serves on a two-rung
 | Dependency | Kind | Used for | Absent ⇒ |
 | --- | --- | --- | --- |
 | An ONNX artifact on disk | Optional | Tier 1's real model, instead of the lexicon fallback | `/v1/capabilities` reports `scorer_kind: lexicon`; answers still work, less accurately |
-| [air-llm](../air-llm/README.md) | Optional | Tiers 2 and 3 both — local and cloud models, routing, cost, cache | Ladder stops at `t1_classifier` |
+| [air-model-gateway](../air-model-gateway/README.md) | Optional | Tiers 2 and 3 both — local and cloud models, routing, cost, budgets, cache | Ladder stops at `t1_classifier` |
 | Redis | Optional | Verdict cache, idempotency, quotas | Every lookup is a miss; correct, just colder |
 | Prometheus / Grafana | Optional | Scrapes this service's `/metrics` | No dashboards; the endpoint still serves |
 
 Redis and Prometheus are shared platform components owned by
-[air-infra](../air-infra/README.md); air-llm is its own standalone service, started and
-configured independently (its own README covers provider keys and its own local model runtime setup —
-container vs. native, warming the model, all of it is air-llm's concern now, not this
-repo's):
+[air-infra](../air-infra/README.md); air-model-gateway is its own standalone service, started
+and configured independently (its own README covers provider keys and its local model
+runtime — container vs. native, warming the model, all of it is the gateway's concern, not
+this repo's):
 
 ```bash
-cd ../air-infra && make up      # redis, postgres, mongo
-cd ../air-llm && make up        # every model this service will ever call
+cd ../air-infra && make up           # redis, postgres, mongo
+cd ../air-model-gateway && make up   # every model this service will ever call
 ```
 
 In production the question does not arise: every endpoint above is an environment variable,
@@ -284,12 +298,12 @@ make doctor    # what is reachable, and what to do about it
 ```bash
 make up        # this service on :8082, joined to air-infra's air-net network for redis
 make logs
-make down      # stops this service; air-infra's and air-llm's stacks keep running
+make down      # stops this service; air-infra's and air-model-gateway's stacks keep running
 ```
 
 `make up` refuses to start if air-infra is not up, naming the fix — a missing
 network is a better failure than a service that boots healthy and then times out
-on every call. It does not check air-llm the same way: a missing air-llm is a
+on every call. It does not check air-model-gateway the same way: a missing gateway is a
 supported, degraded shape (`make doctor` reports it), not a reason to refuse to boot.
 
 ## Configuration
@@ -353,4 +367,6 @@ uses, just pointed at a different artifact. Without either, the service still bo
 Tier 1 runs its lexicon fallback and `/v1/capabilities` says so.
 
 Tests mirror the source tree under `tests/`, split into `unit/`, `integration/` (marked
-`integration`, needs Redis and air-llm) and `contract/`.
+`integration`; wires real components together, with the gateway mocked at the HTTP layer,
+so it needs no external service), `contract/` and `eval/` (the golden set; its `live` cases
+need a reachable air-model-gateway, `make test-eval-live`).
