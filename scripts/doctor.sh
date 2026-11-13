@@ -13,6 +13,10 @@ set -uo pipefail
 
 NETWORK="${NETWORK:-air-net}"
 INFRA_DIR="${INFRA_DIR:-../air-infra}"
+# `shared` expects air-infra's network and Redis; `none` is the standalone
+# container run (`make up INFRA=none`), where their absence is expected.
+INFRA="${INFRA:-shared}"
+STANDALONE_NETWORK="${STANDALONE_NETWORK:-air-classifier-service-net}"
 MODEL_GATEWAY_DIR="${MODEL_GATEWAY_DIR:-../air-model-gateway}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8082}"
@@ -26,17 +30,30 @@ note() { printf '  \033[33m!\033[0m %s\n' "$1"; warn=$((warn + 1)); }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 hdr "air-infra (redis)"
+# A container already running on the standalone network says which mode this
+# is, whatever INFRA was passed: doctor reports what is, not what was asked for.
+standalone=0
+if [ "$INFRA" = "none" ]; then
+  standalone=1
+elif docker network inspect "$STANDALONE_NETWORK" \
+    --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | grep -q .; then
+  standalone=1
+fi
 if ! docker info >/dev/null 2>&1; then
   bad "docker daemon unreachable — start Docker Desktop"
+elif [ "$standalone" -eq 1 ]; then
+  ok "standalone run (INFRA=none): own network '$STANDALONE_NETWORK', in-process cache — air-infra not needed"
 elif docker network inspect "$NETWORK" >/dev/null 2>&1; then
   ok "network '$NETWORK' is up"
 else
-  bad "network '$NETWORK' is missing — run 'cd $INFRA_DIR && make up'"
+  bad "network '$NETWORK' is missing — run 'cd $INFRA_DIR && make up', or 'make up INFRA=none' to run without it"
 fi
 
 # Addressed on the host, which is how the native inner loop reaches it and how
 # a developer verifies it regardless of where this service is running.
-if docker exec air-infra-redis-1 redis-cli -a localdevpass ping 2>/dev/null | grep -q PONG; then
+if [ "$standalone" -eq 1 ]; then
+  : # nothing to check: the standalone run's cache lives in the container
+elif docker exec air-infra-redis-1 redis-cli -a localdevpass ping 2>/dev/null | grep -q PONG; then
   ok "redis answers an authenticated PING"
 else
   bad "air-infra's redis is not answering — 'cd $INFRA_DIR && make ps'"

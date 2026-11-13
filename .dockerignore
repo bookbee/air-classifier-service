@@ -29,6 +29,7 @@ tests/
 docs/
 prometheus.yml
 docker-compose.yml
+docker-compose.standalone.yml
 Dockerfile
 Makefile
 

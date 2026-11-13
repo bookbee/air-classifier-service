@@ -306,6 +306,19 @@ network is a better failure than a service that boots healthy and then times out
 on every call. It does not check air-model-gateway the same way: a missing gateway is a
 supported, degraded shape (`make doctor` reports it), not a reason to refuse to boot.
 
+To run the container **without air-infra** (no `air-net`, no shared Redis), opt in
+explicitly:
+
+```bash
+make up INFRA=none     # own network, in-process cache (docker-compose.standalone.yml)
+make down              # works for either mode
+```
+
+Only the verdict cache changes: it lives in the container instead of Redis, so it is
+cold after every restart and not shared between replicas. Answers are the same. The
+gateway is reached over the host in both modes. Without make:
+`docker compose -f docker-compose.yml -f docker-compose.standalone.yml up -d --build`.
+
 ## Configuration
 
 12-factor throughout: every value is an environment variable prefixed `AIR_CLASSIFIER__`,

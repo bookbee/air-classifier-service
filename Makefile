@@ -19,6 +19,22 @@ SERVE_LOG ?= .run/service.log
 # host — see docker-compose.yml — never through this network.
 NETWORK ?= air-net
 INFRA_DIR ?= ../air-infra
+
+# Container runs only: `shared` (default) joins air-infra's air-net and its
+# Redis, and refuses to start without them; `none` runs this service on its own
+# network with an in-process cache (docker-compose.standalone.yml). The native
+# loop (`make run`) never touches either network.
+INFRA ?= shared
+STANDALONE_NETWORK := air-classifier-service-net
+ifeq ($(INFRA),shared)
+COMPOSE_FILES := -f docker-compose.yml
+UP_DEPS := infra-check
+else ifeq ($(INFRA),none)
+COMPOSE_FILES := -f docker-compose.yml -f docker-compose.standalone.yml
+UP_DEPS :=
+else
+$(error INFRA must be `shared` or `none`, got `$(INFRA)`)
+endif
 MODEL_GATEWAY_DIR ?= ../air-model-gateway
 
 # The listening server, and only it. `lsof -ti tcp:$(PORT)` on its own also
@@ -38,7 +54,7 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Overridable: IMAGE=$(IMAGE) TAG=$(TAG) HOST=$(HOST) PORT=$(PORT)"
+	@echo "Overridable: IMAGE=$(IMAGE) TAG=$(TAG) HOST=$(HOST) PORT=$(PORT) INFRA=$(INFRA) (shared|none)"
 
 $(PY):
 	python3.12 -m venv $(VENV)
@@ -122,23 +138,35 @@ infra-check: ## Fail early if air-infra's shared stack is not up
 		echo; \
 		echo "    cd $(INFRA_DIR) && make up"; \
 		echo; \
+		echo "Or run this service without them (own network, in-memory cache):"; \
+		echo; \
+		echo "    make up INFRA=none"; \
+		echo; \
 		exit 1; }
 
-up: infra-check ## Start this service as a container, against air-infra + air-model-gateway
-	$(COMPOSE) up -d --build
+up: $(UP_DEPS) ## Start this service as a container (INFRA=none: without air-infra's network and Redis)
+	$(COMPOSE) $(COMPOSE_FILES) up -d --build
 	@echo
 	@echo "api      http://$(HOST):$(PORT)/v1/health"
 	@echo "models   http://host.docker.internal:8083, air-model-gateway (cd $(MODEL_GATEWAY_DIR) && make up if it is not)"
+ifeq ($(INFRA),shared)
 	@echo "metrics  scraped by air-infra's prometheus (make up-observability there)"
+else
+	@echo "cache    in-process (INFRA=none: no air-net, no shared Redis)"
+endif
 
 down: ## Stop this service. Shared dependencies keep running in air-infra/air-model-gateway.
-	$(COMPOSE) down --remove-orphans
+	$(COMPOSE) $(COMPOSE_FILES) down --remove-orphans
+	@# A standalone run stopped without INFRA=none leaves its own network behind,
+	@# because the base file only knows the external air-net. Remove it if unused.
+	@docker network rm $(STANDALONE_NETWORK) >/dev/null 2>&1 || true
 
 logs: ## Tail the app's logs
-	$(COMPOSE) logs -f --tail=100 air-classifier-service
+	$(COMPOSE) $(COMPOSE_FILES) logs -f --tail=100 air-classifier-service
 
 doctor: ## Check this service's dependencies are reachable
 	@NETWORK=$(NETWORK) INFRA_DIR=$(INFRA_DIR) MODEL_GATEWAY_DIR=$(MODEL_GATEWAY_DIR) \
+		INFRA=$(INFRA) STANDALONE_NETWORK=$(STANDALONE_NETWORK) \
 		HOST=$(HOST) PORT=$(PORT) bash scripts/doctor.sh
 
 clean: ## Remove build and tool caches (leaves .venv alone)

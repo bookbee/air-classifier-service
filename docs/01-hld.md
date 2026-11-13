@@ -294,7 +294,10 @@ ladder can be exercised with four fake tiers and no network.
   Tier 3 both) is air-model-gateway's — a separate, independently-deployed service on its own
   network, reached over the host (`host.docker.internal`) rather than a shared compose network,
   because the gateway is meant to be reachable the same way in every environment, local
-  included.
+  included. `make up INFRA=none` layers `docker-compose.standalone.yml` on top for a run
+  without air-infra: the project's own network and an in-process cache instead of `air-net`
+  and Redis. The default stays `external: true`, so a missing shared stack is still a loud
+  failure unless that opt-in is explicit.
 - **Config** — 12-factor via environment variables mapped through `pydantic-settings`;
   secrets injected, never baked into the image; `.env.example` documents every key.
 - **Probes** — `/v1/health` for liveness (process only), `/v1/ready` for readiness (probes

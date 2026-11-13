@@ -44,6 +44,9 @@ are optional — a bare checkout with nothing configured still boots and serves 
   logs to `.run/service.log`). Serves on `127.0.0.1:8082` (AIR port map: 8080 air-infra,
   8081 air-platform, 8083 air-model-gateway). `.env` is read once at startup — restart after editing it.
 - `make check` = `lint` + `typecheck` + `test` — everything CI runs. `make fmt` autofixes.
+- `make up` runs the container on air-infra's external `air-net` (with its Redis) and fails if
+  that network is missing — on purpose. `make up INFRA=none` runs it standalone instead (own
+  network, in-process cache, `docker-compose.standalone.yml`).
 - `make test-unit` / `make test-integration` / `make test-eval` (golden accuracy/calibration set,
   `tests/eval/` over `evals/golden_set.jsonl`). `make test-eval-live` runs the T2/T3 golden cases
   against a real air-model-gateway (needs `MODEL_GATEWAY_TOKEN`, `MODEL_GATEWAY_BASE_URL`).
