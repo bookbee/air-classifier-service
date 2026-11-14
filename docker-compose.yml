@@ -1,0 +1,93 @@
+# air-classifier-service — this service, and nothing else.
+#
+# Redis and Prometheus are shared platform components owned by air-infra and
+# are NOT started here. This file joins air-infra's `air-net` network and
+# addresses Redis by service name, so the whole platform still runs on one
+# laptop with each port bound exactly once (air-infra/README.md, port map).
+# Every model call — Tier 2 and Tier 3 both — goes to air-model-gateway instead,
+# which is its own standalone service on its own network, reached over the host
+# (`host.docker.internal`) exactly like a host-native Ollama used to be.
+#
+#   cd ../air-infra && make up            # once, before this — redis
+#   cd ../air-model-gateway && make up    # once, before this — models
+#   make up                               # here
+#
+# In production none of this applies: DevOps supplies every endpoint below as an
+# environment variable against managed instances, and the compose file is not
+# deployed at all.
+name: air-classifier-service
+
+services:
+  air-classifier-service:
+    build:
+      context: .
+      target: runtime
+    image: air-classifier-service:local
+    ports:
+      # Host side is 8082, this service's slot in the AIR port map
+      # (air-infra/README.md). Container side stays 8080 — pinned by the
+      # Dockerfile, and the port air-infra's prometheus scrapes on the host.
+      - "${AIR_CLASSIFIER_SERVICE_PORT:-8082}:8080"
+    # Lets the container reach a natively-run dependency on the developer's
+    # laptop. Required on Linux; Docker Desktop provides the name and ignores it.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Tier 1's artifact until it has somewhere public to live (Dockerfile's
+      # `model` stage comment). `./models` is the same directory a host-native
+      # run already reads from and `scripts/export_zeroshot_model.py --output
+      # ./models` already writes to, so producing the artifact once makes it
+      # available to both run modes. Read-only: the container has no business
+      # writing back to it. Harmless when the directory is empty or absent —
+      # the tier falls back to its lexicon scorer exactly as it does when the
+      # image's own bake-in step found nothing to fetch.
+      - ./models:/opt/models:ro
+    environment:
+      AIR_CLASSIFIER__APP__ENV: development
+      AIR_CLASSIFIER__OBS__LOG_FORMAT: console
+      AIR_CLASSIFIER__OBS__LOG_LEVEL: INFO
+      # The local stack authenticates like every other environment. One known key
+      # is baked in — raw value `airc_local_dev_key`, hashed against the dev salt
+      # below — so callers such as air-client exercise the real auth path rather
+      # than an anonymous bypass. Both values are overridden in any real deploy.
+      AIR_CLASSIFIER__SECURITY__HASH_SALT: air-classifier-service-dev-salt
+      AIR_CLASSIFIER__SECURITY__API_KEYS_INLINE: >-
+        [{"id":"local-dev","name":"Local development",
+        "key_hash":"9ad4d249e63199d6a383fca073629b7f24bafefb682ddeb9c27c641bdfbd855e",
+        "scopes":["classify:read","admin:read"]}]
+      AIR_CLASSIFIER__SECURITY__ALLOW_UNAUTHENTICATED: "false"
+      # Tier 1. `./models` is bind-mounted above at /opt/models; the Dockerfile's
+      # own ENV already points there — but .env's MODEL_PATH is set for a
+      # host-native `uvicorn` run (relative to the repo root) and, being outside
+      # this block, would otherwise arrive via `env_file:` and clobber the
+      # correct in-image default with a path that does not exist in the
+      # container. Pinning it here, to the same value the image already sets,
+      # is what keeps that override from taking hold.
+      AIR_CLASSIFIER__CLASSIFIER__MODEL_PATH: /opt/models/model.onnx
+      AIR_CLASSIFIER__CLASSIFIER__TOKENIZER_PATH: /opt/models/tokenizer.json
+      # Tiers 2 and 3 both. air-model-gateway publishes 8082+1=8083 on the host
+      # (its own README's port map) regardless of whether it is itself running natively
+      # or in its own compose stack, so the container reaches it the same way
+      # this repo's own native-Ollama support always worked: over the host.
+      AIR_CLASSIFIER__MODEL_GATEWAY__BASE_URL: http://host.docker.internal:8083
+      # air-infra's redis. Password-protected even locally, so the credentials
+      # are part of the URL — an unauthenticated URL here fails closed and the
+      # cache silently degrades to misses rather than erroring.
+      AIR_CLASSIFIER__CACHE__BACKEND: redis
+      AIR_CLASSIFIER__CACHE__REDIS_URL: redis://:localdevpass@redis:6379/0
+    # air-model-gateway's service token arrives from an untracked .env;
+    # `environment:` wins over `env_file:`, so it is deliberately absent above.
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
+    # Healthcheck comes from the image so the probe cannot drift from the one
+    # a production orchestrator uses.
+
+# air-infra owns this network and must be up first. `external: true` makes that
+# a loud failure ("network air-net not found") instead of a service that boots
+# healthy and then times out on every dependency.
+networks:
+  default:
+    name: air-net
+    external: true

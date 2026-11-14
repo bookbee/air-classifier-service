@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Background server logs from `make start`.
+.run/
+
+# Tier-1 ONNX artifact — produced by scripts/export_zeroshot_model.py and bind-mounted
+# into the container (docker-compose.yml); not committed, not baked into the image.
+/models/
+
+# macOS Finder metadata.
+.DS_Store
+# Cloud-sync conflict copies (Dropbox/OneDrive-style ".!<pid>!.DS_Store") — the plain
+# ".DS_Store" rule above does not match this naming scheme, and one was previously
+# committed by accident (git history, since removed).
+.!*!.DS_Store
