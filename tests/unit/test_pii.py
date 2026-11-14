@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from air_classifier_service.constants import PIIKind
-from air_classifier_service.preprocess.pii import luhn_valid, redact
+from air_classifier_service.preprocess.pii import iban_valid, luhn_valid, redact
 
 
 def _kinds(text: str) -> set[PIIKind]:
@@ -178,3 +178,26 @@ def test_placeholders_are_not_themselves_redacted_again() -> None:
     once = redact("Email a@example.com and call +44 20 7946 0958")
 
     assert redact(once.text).redacted is False
+
+
+# ── IBAN (SIT CL-006c) ────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "iban",
+    ["DE89 3704 0044 0532 0130 00", "DE89370400440532013000", "GB82 WEST 1234 5698 7654 32"],
+)
+def test_an_iban_is_reported_as_an_iban_not_a_phone(iban: str) -> None:
+    result = redact(f"Please refund to IBAN {iban} today")
+
+    assert result.text == "Please refund to IBAN [REDACTED:iban] today"
+    assert [(finding.kind, finding.count) for finding in result.findings] == [(PIIKind.IBAN, 1)]
+
+
+def test_iban_checksum_gates_the_match() -> None:
+    assert iban_valid("GB82WEST12345698765432") is True
+    assert iban_valid("GB83WEST12345698765432") is False
+
+
+def test_an_iban_shaped_product_code_is_left_alone() -> None:
+    assert redact("SKU AB12 CDEF GHIJ KLMN is back in stock").redacted is False

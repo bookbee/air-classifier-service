@@ -7,9 +7,13 @@ time" silently loses information.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from typing import Any
+
 import pytest
 from pydantic import ValidationError
 
+from air_classifier_service.constants import Label, Urgency
 from air_classifier_service.schemas.summary import (
     RECENT_RATINGS_WINDOW,
     CustomerSummary,
@@ -49,12 +53,7 @@ def test_recent_ratings_field_is_capped_at_the_window() -> None:
 def test_customer_summary_round_trips_through_json() -> None:
     summary = CustomerSummary(
         narrative="A generally satisfied customer with one recent complaint.",
-        rollup=SummaryRollup(
-            total_items=3,
-            counts_by_source_type={"feedback": 2, "review": 1},
-            recent_ratings=[4.0, 5.0],
-            average_rating=4.5,
-        ),
+        rollup=_consistent_rollup(),
         version=1,
     )
 
@@ -74,3 +73,50 @@ def test_existing_summary_is_optional() -> None:
 def test_items_batch_requires_at_least_one() -> None:
     with pytest.raises(ValidationError):
         SummaryRefreshRequest(customer_id="cust_1", items=[])
+
+
+# ── Rollup consistency (SIT CL-006f) ──────────────────────────────────────────
+
+
+def _consistent_rollup(**overrides: Any) -> SummaryRollup:
+    """Three items, two rated — a rollup `_merge_rollup` could have produced."""
+    fields: dict[str, Any] = {
+        "total_items": 3,
+        "counts_by_source_type": {"feedback": 2, "review": 1},
+        "sentiment_counts": {Label.POSITIVE: 2, Label.NEGATIVE: 1},
+        "urgency_counts": {Urgency.LOW: 3},
+        "rating_count": 2,
+        "rating_sum": 9.0,
+        "average_rating": 4.5,
+        "recent_ratings": [4.0, 5.0],
+        "recent_average_rating": 4.5,
+        "first_seen_at": datetime(2026, 1, 1, tzinfo=UTC),
+        "last_seen_at": datetime(2026, 2, 1, tzinfo=UTC),
+    }
+    fields.update(overrides)
+    return SummaryRollup.model_validate(fields)
+
+
+def test_an_empty_rollup_is_consistent() -> None:
+    assert SummaryRollup().total_items == 0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"counts_by_source_type": {"review": 999}},
+        {"counts_by_source_type": {"feedback": 2, "chat": 1}},
+        {"sentiment_counts": {Label.POSITIVE: 1}},
+        {"urgency_counts": {Urgency.LOW: 4, Urgency.HIGH: -1}},
+        {"topic_counts": {"delivery": 4}},
+        {"rating_count": 4},
+        {"average_rating": 50.0},
+        {"rating_sum": 900.0, "average_rating": 450.0},
+        {"recent_ratings": [4.0, 5.0, 3.0]},
+        {"first_seen_at": datetime(2026, 3, 1, tzinfo=UTC)},
+        {"last_seen_at": None},
+    ],
+)
+def test_an_inconsistent_rollup_is_rejected(overrides: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        _consistent_rollup(**overrides)

@@ -138,10 +138,12 @@ def get_app_state(request: Request) -> AppState:
 async def require_api_key(request: Request) -> ApiKeyRecord:
     """Resolve the caller's identity from ``X-API-Key``.
 
-    The 401/403 split is deliberate and is what the store's ``None`` cannot
-    express on its own: *no* credential is a 401 (send one), while a credential
-    that is unknown, malformed or revoked is a 403 (this one will never work).
-    Neither branch reveals which of those it was, and neither logs the key.
+    Both a missing credential and one that is unknown, malformed or revoked are
+    a 401 `missing-api-key`: neither authenticates the caller, and a 403 would
+    tell them their key is valid but under-scoped and send them looking at
+    scopes instead of the key (SIT CL-006a). 403 is kept for what it means — an
+    *authenticated* key without the scope or the tier it asked for. The detail
+    says which of the two 401 cases it was; neither branch logs the key.
     """
     state = get_app_state(request)
     raw = request.headers.get(HEADER_API_KEY)
@@ -166,7 +168,7 @@ async def require_api_key(request: Request) -> ApiKeyRecord:
         raise MissingApiKeyError(detail=f"{HEADER_API_KEY} header is required")
 
     logger.warning("auth.rejected", path=request.url.path)
-    raise InsufficientScopeError(detail="The provided API key is not valid for this service")
+    raise MissingApiKeyError(detail="The provided API key is not valid for this service")
 
 
 def require_scope(scope: str) -> Callable[[Request], Awaitable[ApiKeyRecord]]:

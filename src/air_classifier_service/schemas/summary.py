@@ -37,6 +37,13 @@ __all__ = [
 #: reuses it when sliding the window on merge.
 RECENT_RATINGS_WINDOW: Final = 5
 
+#: `SummaryItem.source_type`'s vocabulary, which the rollup's per-source counts key on.
+_SOURCE_TYPES: Final[tuple[str, ...]] = ("feedback", "review")
+#: The highest rating any item can carry (`SummaryItem.rating_scale_max`'s ceiling).
+_MAX_RATING: Final[float] = 100.0
+#: Float slack for `average_rating == rating_sum / rating_count` after a JSON round trip.
+_RATING_TOLERANCE: Final[float] = 1e-6
+
 
 class SummaryItem(BaseModel):
     """One new feedback or review text to fold into a customer's summary.
@@ -122,6 +129,62 @@ class SummaryRollup(BaseModel):
         default=None, description="`occurred_at` of the most recent item folded in."
     )
 
+    @model_validator(mode="after")
+    def _internally_consistent(self) -> Self:
+        """Refuse a rollup this service could not have produced.
+
+        The caller stores and resends the rollup, so it arrives untrusted. Each
+        rule below holds by construction for every rollup `_merge_rollup`
+        returns; one that breaks them was edited or corrupted in storage, and
+        merging into it would only bake the damage in — `first_seen_at` later
+        than `last_seen_at` used to be silently overwritten with *now*, losing
+        the customer's history (SIT CL-006f). A 422 tells the caller to rebuild
+        the summary from scratch instead.
+        """
+        total = self.total_items
+        for name in ("counts_by_source_type", "sentiment_counts", "urgency_counts"):
+            histogram: dict[Any, int] = getattr(self, name)
+            if any(count < 0 for count in histogram.values()):
+                raise ValueError(f"{name} has a negative count")
+            if sum(histogram.values()) != total:
+                summed = sum(histogram.values())
+                raise ValueError(f"{name} sums to {summed}, not total_items {total}")
+        if unknown := set(self.counts_by_source_type) - set(_SOURCE_TYPES):
+            raise ValueError(f"counts_by_source_type has unknown source types {sorted(unknown)}")
+        if any(count < 0 or count > total for count in self.topic_counts.values()):
+            raise ValueError("a topic_counts entry is negative or exceeds total_items")
+
+        if self.rating_count > total:
+            raise ValueError("rating_count exceeds total_items")
+        if len(self.recent_ratings) > self.rating_count:
+            raise ValueError("recent_ratings holds more ratings than rating_count")
+        if any(not 0.0 <= rating <= _MAX_RATING for rating in self.recent_ratings):
+            raise ValueError(f"recent_ratings must each be within 0..{_MAX_RATING:g}")
+        if self.rating_count == 0:
+            if self.rating_sum != 0.0 or self.average_rating is not None:
+                raise ValueError("rating_sum/average_rating set with rating_count 0")
+        else:
+            expected = self.rating_sum / self.rating_count
+            if not 0.0 <= expected <= _MAX_RATING:
+                raise ValueError(f"average rating must be within 0..{_MAX_RATING:g}")
+            if (
+                self.average_rating is None
+                or abs(self.average_rating - expected) > _RATING_TOLERANCE
+            ):
+                raise ValueError("average_rating is not rating_sum / rating_count")
+
+        if (self.first_seen_at is None) != (self.last_seen_at is None):
+            raise ValueError("first_seen_at and last_seen_at must be set together")
+        if (self.first_seen_at is not None) != (total > 0):
+            raise ValueError("first_seen_at/last_seen_at must be set exactly when total_items > 0")
+        if (
+            self.first_seen_at is not None
+            and self.last_seen_at is not None
+            and self.first_seen_at > self.last_seen_at
+        ):
+            raise ValueError("first_seen_at is later than last_seen_at")
+        return self
+
 
 class CustomerSummary(BaseModel):
     """The full rolling state a caller stores and resends on the next refresh.
@@ -190,6 +253,15 @@ class SummaryRefreshResponse(BaseModel):
     degraded: bool = Field(
         default=False,
         description="True if the narrative refresh failed; rollup and items are still current.",
+    )
+    degraded_reason: str | None = Field(
+        default=None,
+        description=(
+            "Why the narrative was not refreshed, when `degraded` is true: "
+            "`model_gateway_not_configured`, `model_unavailable`, `timeout`, `rate_limited`, "
+            "`budget_exceeded`, `request_rejected`, `model_refused` or `invalid_model_output`. "
+            "Null otherwise."
+        ),
     )
     usage: RequestUsage = Field(
         default_factory=RequestUsage, description="Summed across items classified successfully."

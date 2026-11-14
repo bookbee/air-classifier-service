@@ -31,9 +31,14 @@ from air_classifier_service.observability.logging import get_logger
 from air_classifier_service.pipeline.service import AnalysisService
 from air_classifier_service.providers.base import (
     LLMProvider,
+    ProviderBudgetExceededError,
     ProviderError,
+    ProviderRateLimitError,
+    ProviderRefusalError,
+    ProviderRequestError,
     ProviderResult,
     ProviderSchemaError,
+    ProviderUnavailableError,
 )
 from air_classifier_service.providers.prompts.summary_loader import (
     summary_repair_instruction,
@@ -118,7 +123,7 @@ class SummaryService:
         pairs = _succeeded_pairs(request.items, batch_items)
         existing = request.existing_summary
         rollup = _merge_rollup(existing.rollup if existing is not None else None, pairs)
-        narrative, degraded = await self._refresh_narrative(
+        narrative, degraded_reason = await self._refresh_narrative(
             existing=existing, pairs=pairs, request_id=request_id
         )
 
@@ -131,7 +136,8 @@ class SummaryService:
                 version=existing.version if existing is not None else 1,
             ),
             items=batch_items,
-            degraded=degraded,
+            degraded=degraded_reason is not None,
+            degraded_reason=degraded_reason,
             usage=_sum_usage(batch_items),
             latency_ms=max(0.0, round((time.perf_counter() - started) * 1000.0, 3)),
         )
@@ -144,30 +150,36 @@ class SummaryService:
         existing: CustomerSummary | None,
         pairs: Sequence[tuple[SummaryItem, ClassificationResponse]],
         request_id: str,
-    ) -> tuple[str, bool]:
-        """The updated narrative, and whether the refresh itself degraded.
+    ) -> tuple[str, str | None]:
+        """The updated narrative, and why the refresh degraded (`None` if it did not).
 
         Never raises. A missing/unconfigured provider, a timeout, an outage, or
         two consecutive schema violations all land the same way: the prior
-        narrative comes back unchanged, `degraded=True`.
+        narrative comes back unchanged and the response is `degraded`. The
+        reason travels with it (SIT CL-006g): "the narrative is empty" reads the
+        same whether the gateway is unconfigured, its local model is down, or
+        today's budget is spent, and each of those has a different fix.
         """
         prior = existing.narrative if existing is not None else ""
         if self._provider is None or not self._provider.configured:
-            return prior, True
+            return prior, "model_gateway_not_configured"
 
         system = summary_system_prompt()
         user = summary_user_content(existing=existing, items=pairs)
         try:
             result = await self._classify_with_one_repair(system, user, request_id=request_id)
         except (ProviderError, TimeoutError, CircuitOpenError, BulkheadFullError) as exc:
-            logger.warning("summary.narrative_refresh_failed", error=type(exc).__name__)
-            return prior, True
+            reason = _degraded_reason(exc)
+            logger.warning(
+                "summary.narrative_refresh_failed", error=type(exc).__name__, reason=reason
+            )
+            return prior, reason
 
         parsed = result.parsed
         if not isinstance(parsed, LLMSummaryOutput):
             logger.warning("summary.narrative_refresh_failed", error="unexpected_output_type")
-            return prior, True
-        return parsed.narrative, False
+            return prior, "invalid_model_output"
+        return parsed.narrative, None
 
     async def _classify_with_one_repair(
         self, system: str, user: str, *, request_id: str
@@ -243,6 +255,31 @@ def _succeeded_pairs(
     ]
     pairs.sort(key=lambda pair: pair[0].occurred_at or _UNDATED_SORTS_LAST)
     return pairs
+
+
+def _degraded_reason(exc: Exception) -> str:
+    """The caller-facing reason code for a failed narrative call.
+
+    Most specific class first: a budget refusal is also a rate limit, and every
+    provider error is a `ProviderError`.
+    """
+    for kind, reason in _DEGRADED_REASONS:
+        if isinstance(exc, kind):
+            return reason
+    return "model_unavailable"
+
+
+_DEGRADED_REASONS: Final[tuple[tuple[type[Exception], str], ...]] = (
+    (ProviderBudgetExceededError, "budget_exceeded"),
+    (ProviderRateLimitError, "rate_limited"),
+    (ProviderRequestError, "request_rejected"),
+    (ProviderRefusalError, "model_refused"),
+    (ProviderSchemaError, "invalid_model_output"),
+    (TimeoutError, "timeout"),
+    (ProviderUnavailableError, "model_unavailable"),
+    (CircuitOpenError, "model_unavailable"),
+    (BulkheadFullError, "model_unavailable"),
+)
 
 
 def _merge_rollup(

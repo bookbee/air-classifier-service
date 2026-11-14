@@ -9,10 +9,13 @@ the ladder tunable from configuration alone.
 Two properties of :meth:`EscalationPolicy.decide` matter more than the
 arithmetic:
 
-* **Stop conditions are checked first, in the documented order.** A ceiling, an
-  exhausted budget, a spent cost allowance or a missing next rung all mean the
-  same thing — there is nowhere to go — and no amount of low confidence can
-  override them.
+* **Stop conditions win, in the documented order.** A ceiling, an exhausted
+  budget, an unaffordable next rung or a missing one all mean the same thing —
+  there is nowhere to go — and no amount of low confidence can override them.
+  The tier ceiling and latency budget are checked first; the cost and
+  availability stops are checked after the quality rules, because both depend
+  on which rung is next and both should only be reported when the ladder
+  actually wanted to climb.
 * **Escalation reasons accumulate.** A narrow-margin verdict on a contrastive
   sentence reports both, because the trace exists to explain the climb and one
   reason rarely tells the whole story. The first reason is the primary one, so
@@ -23,7 +26,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from air_classifier_service.config import Settings
+from air_classifier_service.config import Settings, TierSettings
 from air_classifier_service.constants import EscalationReason, Tier
 from air_classifier_service.pipeline.tiers.base import TierContext
 from air_classifier_service.schemas.common import ComplexityFeatures, Options
@@ -45,7 +48,12 @@ class EscalationPolicy:
     # ── The truth table ───────────────────────────────────────────────────────
 
     def decide(
-        self, verdict: TierVerdict, ctx: TierContext, *, next_available: bool
+        self,
+        verdict: TierVerdict,
+        ctx: TierContext,
+        *,
+        next_available: bool,
+        next_cost_usd: float = 0.0,
     ) -> EscalationDecision:
         """Should the ladder climb past `verdict`?
 
@@ -57,7 +65,8 @@ class EscalationPolicy:
         `next_available` is the orchestrator's lookahead: there is a further
         rung, it is enabled, and it says it can serve. The policy cannot probe
         for that itself without holding tier instances, which would make it as
-        untestable as the thing it governs.
+        untestable as the thing it governs. `next_cost_usd` is that rung's
+        expected cost (:meth:`expected_cost_usd`), for the same reason.
         """
         options = ctx.options
         floors = self._settings.tiers.for_tier(verdict.tier)
@@ -70,11 +79,6 @@ class EscalationPolicy:
         if ctx.budget_exhausted:
             return EscalationDecision.stop(EscalationReason.BUDGET_EXHAUSTED)
 
-        # 3 — the caller's money is spent. Note that `max_cost_usd == 0` pins the
-        # ladder to its first rung by definition, which is the point of it.
-        if ctx.cost_spent_usd >= options.max_cost_usd:
-            return EscalationDecision.stop(EscalationReason.COST_CEILING)
-
         # The quality rules (5-11) are evaluated before the "nowhere to climb to"
         # check, even though that check can only ever stop the ladder. Knowing
         # *whether we wanted to climb* is what makes the trace honest: reporting
@@ -82,6 +86,57 @@ class EscalationPolicy:
         # operator we were blocked when in fact we were simply finished, and
         # sends them hunting for an outage that never happened. All of these
         # rules are pure computation, so evaluating them costs nothing.
+        reasons = self._quality_reasons(verdict, ctx, floors=floors)
+
+        if not reasons:
+            return EscalationDecision.stop(EscalationReason.CONFIDENT)
+
+        # 4 — we wanted to climb, but there is nowhere to climb to: no next rung,
+        # or it is down. The outcome is the same stop either way; what differs is
+        # that the trace now says so only when it is true.
+        if not next_available:
+            return EscalationDecision.stop(EscalationReason.NEXT_TIER_UNAVAILABLE)
+
+        # 3 — we wanted to climb, and the next rung would cost more than the
+        # caller has left. Checked against that rung's *expected* cost before it
+        # runs: a ceiling checked only against money already spent is passed by
+        # every first paid call, however far over the ceiling that call goes
+        # (SIT CL-001). It sits here rather than with the hard ceilings above
+        # because it depends on which rung is next, and because a free rung
+        # (cost 0) stays reachable under `max_cost_usd: 0` (CL-002). The
+        # quality reasons ride along, so the trace says what the money would
+        # have bought.
+        if ctx.cost_spent_usd + next_cost_usd > options.max_cost_usd:
+            return EscalationDecision.stop(EscalationReason.COST_CEILING, *reasons)
+
+        return EscalationDecision.climb(*reasons)
+
+    # ── Answer quality ────────────────────────────────────────────────────────
+
+    def is_settled(self, verdict: TierVerdict) -> bool:
+        """Whether `verdict` meets its own rung's confidence and margin floors.
+
+        Deliberately narrower than the quality rules: complexity triggers,
+        `min_tier`, disagreement and language say *whom else to ask*, not that
+        this answer is poor — a confident T3 answer to a sentence with "but" in
+        it is the ladder working, not a weak verdict. The orchestrator combines
+        this with how the ladder stopped to decide whether a degraded result is
+        still safe to cache (a dead rung hopped on the way to a confident one).
+        """
+        if not verdict.is_usable:
+            return False
+        floors = self._settings.tiers.for_tier(verdict.tier)
+        if verdict.result.confidence < floors.confidence_floor:
+            return False
+        return floors.margin_floor <= 0.0 or verdict.label_margin >= floors.margin_floor
+
+    # ── Rules 5-11 ────────────────────────────────────────────────────────────
+
+    def _quality_reasons(
+        self, verdict: TierVerdict, ctx: TierContext, *, floors: TierSettings
+    ) -> list[EscalationReason]:
+        """Rules 5-11, in reporting order: every reason this rung wants to climb."""
+        options = ctx.options
         reasons: list[EscalationReason] = []
 
         # 5 — the caller demanded a floor this rung sits below.
@@ -115,17 +170,7 @@ class EscalationPolicy:
             # 11 — this rung was never trained or prompted for this language.
             if self._language_unsupported(verdict, ctx):
                 reasons.append(EscalationReason.UNSUPPORTED_LANGUAGE)
-
-        if not reasons:
-            return EscalationDecision.stop(EscalationReason.CONFIDENT)
-
-        # 4 — we wanted to climb, but there is nowhere to climb to: no next rung,
-        # or it is down. The outcome is the same stop either way; what differs is
-        # that the trace now says so only when it is true.
-        if not next_available:
-            return EscalationDecision.stop(EscalationReason.NEXT_TIER_UNAVAILABLE)
-
-        return EscalationDecision.climb(*reasons)
+        return reasons
 
     # ── Rule 9 ────────────────────────────────────────────────────────────────
 
@@ -185,6 +230,21 @@ class EscalationPolicy:
             return False
         supported = {code.lower() for code in self._settings.classifier.supported_languages}
         return language.code.lower() not in supported
+
+    # ── Cost ──────────────────────────────────────────────────────────────────
+
+    def expected_cost_usd(self, tier: Tier) -> float:
+        """What one call to `tier` is expected to cost (config, per rung)."""
+        return self._settings.tiers.for_tier(tier).expected_cost_usd
+
+    def can_afford(self, tier: Tier, ctx: TierContext) -> bool:
+        """Whether running `tier` fits in what the caller has left to spend.
+
+        The orchestrator asks this before *every* rung, including the first:
+        rule 3 only guards a climb, and a request pinned to a paid rung
+        (`min_tier: t3_cloud_llm`) never climbs into it.
+        """
+        return ctx.cost_spent_usd + self.expected_cost_usd(tier) <= ctx.options.max_cost_usd
 
     # ── Selection and laddering ───────────────────────────────────────────────
 

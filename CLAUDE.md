@@ -25,7 +25,9 @@ Everything else (`sentiment`, `urgency`, `routing`, `requires_human`, `actionabi
 present and is a deterministic derivation, not a model output.
 
 A tier failure never becomes a 5xx: the best lower-tier verdict is returned with `degraded: true`.
-The only 503 is "no tier produced anything at all" (`NoVerdictError`).
+The only 503 is "no tier produced anything at all" (`NoVerdictError`) after something failed;
+when the caller's own `max_tier`/`max_cost_usd`/latency limits left the ladder empty-handed
+with nothing failing, it is a non-retryable 422 `no-verdict-within-limits` instead.
 
 Every model call (local and cloud) goes through **air-model-gateway** (`../air-model-gateway`,
 `POST /v1/generate`), the platform's single model gateway — this service holds no provider SDKs

@@ -137,22 +137,99 @@ def test_rule2_is_preempted_by_the_ceiling(policy: EscalationPolicy) -> None:
 # ── 3 · cost ceiling ──────────────────────────────────────────────────────────
 
 
-def test_rule3_spent_allowance_stops_the_ladder(policy: EscalationPolicy) -> None:
-    ctx = make_ctx(cost_spent_usd=0.05)  # exactly the default allowance
+#: What the policy is told the next (paid) rung costs in the rule-3 tests.
+_T3_COST = 0.005
 
-    decision = policy.decide(verdict(Tier.T2_LOCAL_LLM, confidence=0.1), ctx, next_available=True)
+
+def test_rule3_an_unaffordable_next_rung_stops_the_ladder(policy: EscalationPolicy) -> None:
+    ctx = make_ctx(cost_spent_usd=0.046)  # 0.046 + 0.005 > the default 0.05
+
+    decision = policy.decide(
+        verdict(Tier.T2_LOCAL_LLM, confidence=0.1),
+        ctx,
+        next_available=True,
+        next_cost_usd=_T3_COST,
+    )
 
     assert decision.escalate is False
-    assert decision.reasons == [Reason.COST_CEILING]
+    # The quality reasons ride along: the trace says what the money would have bought.
+    assert decision.reasons == [Reason.COST_CEILING, Reason.LOW_CONFIDENCE]
 
 
-def test_rule3_does_not_fire_below_the_allowance(policy: EscalationPolicy) -> None:
-    ctx = make_ctx(cost_spent_usd=0.049)
+def test_rule3_is_checked_before_the_paid_call_not_after(policy: EscalationPolicy) -> None:
+    """SIT CL-001: nothing spent yet, but the next rung alone exceeds the ceiling."""
+    ctx = make_ctx(options=Options(max_cost_usd=0.001))
 
-    decision = policy.decide(verdict(Tier.T2_LOCAL_LLM, confidence=0.1), ctx, next_available=True)
+    decision = policy.decide(
+        verdict(Tier.T1_CLASSIFIER, confidence=0.1),
+        ctx,
+        next_available=True,
+        next_cost_usd=_T3_COST,
+    )
+
+    assert decision.escalate is False
+    assert decision.primary_reason is Reason.COST_CEILING
+
+
+def test_rule3_a_zero_ceiling_still_reaches_a_free_rung(policy: EscalationPolicy) -> None:
+    """SIT CL-002: `max_cost_usd: 0` means "free tiers only", not "T0 only"."""
+    ctx = make_ctx(options=Options(max_cost_usd=0.0))
+
+    decision = policy.decide(
+        verdict(Tier.T0_RULES, label=Label.UNKNOWN, confidence=0.0),
+        ctx,
+        next_available=True,
+        next_cost_usd=0.0,
+    )
 
     assert decision.escalate is True
-    assert decision.reasons == [Reason.LOW_CONFIDENCE]
+
+
+def test_rule3_a_zero_ceiling_stops_before_a_paid_rung(policy: EscalationPolicy) -> None:
+    ctx = make_ctx(options=Options(max_cost_usd=0.0))
+
+    decision = policy.decide(
+        verdict(Tier.T2_LOCAL_LLM, confidence=0.1),
+        ctx,
+        next_available=True,
+        next_cost_usd=_T3_COST,
+    )
+
+    assert decision.escalate is False
+    assert decision.primary_reason is Reason.COST_CEILING
+
+
+def test_rule3_does_not_misreport_a_confident_verdict(policy: EscalationPolicy) -> None:
+    """A rung that did not want to climb stopped because it was sure, not because of money."""
+    ctx = make_ctx(options=Options(max_cost_usd=0.0))
+
+    decision = policy.decide(
+        verdict(Tier.T1_CLASSIFIER), ctx, next_available=True, next_cost_usd=_T3_COST
+    )
+
+    assert decision.reasons == [Reason.CONFIDENT]
+
+
+def test_can_afford_prices_each_rung_from_config(policy: EscalationPolicy) -> None:
+    capped = make_ctx(options=Options(max_cost_usd=0.001))
+
+    assert policy.can_afford(Tier.T1_CLASSIFIER, capped) is True
+    assert policy.can_afford(Tier.T2_LOCAL_LLM, capped) is True
+    assert policy.can_afford(Tier.T3_CLOUD_LLM, capped) is False
+    assert policy.can_afford(Tier.T3_CLOUD_LLM, make_ctx()) is True
+
+
+def test_rule3_does_not_fire_when_the_next_rung_fits(policy: EscalationPolicy) -> None:
+    ctx = make_ctx(cost_spent_usd=0.044)  # 0.044 + 0.005 <= 0.05
+
+    decision = policy.decide(
+        verdict(Tier.T2_LOCAL_LLM, confidence=0.1),
+        ctx,
+        next_available=True,
+        next_cost_usd=_T3_COST,
+    )
+
+    assert decision.escalate is True
 
 
 def test_rule3_is_preempted_by_the_budget(policy: EscalationPolicy) -> None:
@@ -175,12 +252,13 @@ def test_rule4_nowhere_to_climb_stops_the_ladder(policy: EscalationPolicy) -> No
     assert decision.reasons == [Reason.NEXT_TIER_UNAVAILABLE]
 
 
-def test_rule4_is_preempted_by_the_cost_ceiling(policy: EscalationPolicy) -> None:
+def test_rule4_is_reported_ahead_of_the_cost_ceiling(policy: EscalationPolicy) -> None:
+    """Nothing to climb to is the binding fact; what it would have cost is moot."""
     ctx = make_ctx(cost_spent_usd=0.06)
 
     decision = policy.decide(verdict(Tier.T0_RULES, confidence=0.1), ctx, next_available=False)
 
-    assert decision.reasons == [Reason.COST_CEILING]
+    assert decision.reasons == [Reason.NEXT_TIER_UNAVAILABLE]
 
 
 # ── 5 · min_tier floor ────────────────────────────────────────────────────────
@@ -486,9 +564,12 @@ def test_rule11_reads_the_supported_list_from_settings() -> None:
 def test_rule11_is_preempted_by_a_stop_condition(policy: EscalationPolicy) -> None:
     ctx = make_ctx(language=LanguageInfo(code="fr", confidence=0.99), cost_spent_usd=1.0)
 
-    decision = policy.decide(verdict(Tier.T1_CLASSIFIER), ctx, next_available=True)
+    decision = policy.decide(
+        verdict(Tier.T1_CLASSIFIER), ctx, next_available=True, next_cost_usd=_T3_COST
+    )
 
-    assert decision.reasons == [Reason.COST_CEILING]
+    assert decision.escalate is False
+    assert decision.reasons == [Reason.COST_CEILING, Reason.UNSUPPORTED_LANGUAGE]
 
 
 # ── Fall-through ──────────────────────────────────────────────────────────────

@@ -44,7 +44,11 @@ class CacheBackend(Protocol):
 #: than trying to selectively invalidate. v2: dropped the resource segment
 #: when `/sentiment`, `/feedback` and `/reviews` were removed — one route
 #: means one key shape, and the field never distinguished anything again.
-CACHE_SCHEMA_VERSION = "v2"
+#: v3: SIT fixes, 2026-11-14 — a lexicon-only Tier 1 verdict no longer clears
+#: the floor, zero-confidence topics are dropped, `max_cost_usd` is enforced
+#: before a paid rung runs and `degraded` covers skipped rungs; a v2 verdict
+#: can be confidently wrong, or bought past a ceiling, in ways v3 never is.
+CACHE_SCHEMA_VERSION = "v3"
 
 
 def verdict_cache_key(

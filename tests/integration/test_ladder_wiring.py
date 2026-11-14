@@ -40,6 +40,7 @@ from air_classifier_service.pipeline.tiers.base import (
     TierError,
     TierUnavailableError,
 )
+from air_classifier_service.pipeline.tiers.scorers import ScoreResult
 from air_classifier_service.pipeline.tiers.t0_rules import RulesTier
 from air_classifier_service.pipeline.tiers.t1_classifier import ClassifierTier
 from air_classifier_service.pipeline.tiers.t2_local_llm import LocalLLMTier
@@ -143,14 +144,32 @@ def build_ladder(settings: Settings, *tiers: Tier) -> Orchestrator:
     return Orchestrator(list(tiers), EscalationPolicy(settings), settings)
 
 
-def full_ladder(settings: Settings) -> tuple[Orchestrator, ScriptedTier, ScriptedTier]:
-    """Real T0 and T1, scripted T2 and T3 — the standard arrangement here."""
+def full_ladder(
+    settings: Settings, *, classifier: ClassifierTier | None = None
+) -> tuple[Orchestrator, ScriptedTier, ScriptedTier]:
+    """Real T0 and T1, scripted T2 and T3 — the standard arrangement here.
+
+    T1 is the real tier on whatever backend `build_scorer` finds, which in a
+    checkout without the ONNX artifact is the lexicon fallback.
+    """
     local = ScriptedTier(TierId.T2_LOCAL_LLM, label=Label.MIXED, confidence=0.81)
     cloud = ScriptedTier(TierId.T3_CLOUD_LLM, label=Label.MIXED, confidence=0.93)
     orchestrator = build_ladder(
-        settings, RulesTier(settings), ClassifierTier(settings), local, cloud
+        settings, RulesTier(settings), classifier or ClassifierTier(settings), local, cloud
     )
     return orchestrator, local, cloud
+
+
+class ConfidentModelScorer:
+    """Stands in for the ONNX model: a real backend, sure of a clear sentence."""
+
+    name = "stub-model-1.0"
+    available = True
+
+    def score(self, text: str) -> ScoreResult:
+        return ScoreResult.from_probabilities(
+            {Label.POSITIVE: 0.96, Label.NEGATIVE: 0.02, Label.NEUTRAL: 0.02}
+        )
 
 
 # ── Coherence of the trace ────────────────────────────────────────────────────
@@ -280,9 +299,12 @@ async def test_a_trivially_positive_sentence_stops_at_the_classifier(
 
     The point of the assertion on ``local.calls`` is cost: this is the shape of
     input that must never reach an LLM, because paying for one would mean the
-    two cheap rungs are not earning their place.
+    two cheap rungs are not earning their place. That claim is about a
+    model-backed Tier 1; the lexicon fallback deliberately does not settle it
+    (next test).
     """
-    orchestrator, local, cloud = full_ladder(settings)
+    classifier = ClassifierTier(settings, scorer=ConfidentModelScorer())
+    orchestrator, local, cloud = full_ladder(settings, classifier=classifier)
 
     result = await orchestrator.run(
         build_context(settings, "Absolutely fantastic, superb service, I love it.")
@@ -297,8 +319,42 @@ async def test_a_trivially_positive_sentence_stops_at_the_classifier(
     floors = settings.tiers.for_tier(TierId.T1_CLASSIFIER)
     assert result.best.result.confidence >= floors.confidence_floor
     assert result.best.label_margin >= floors.margin_floor
+    assert result.degraded is False
     assert local.calls == cloud.calls == 0
     assert_trace_is_coherent(result)
+
+
+async def test_on_the_lexicon_fallback_the_same_sentence_climbs(settings: Settings) -> None:
+    """SIT CL-005: the fallback never stops the ladder on its own say-so."""
+    orchestrator, local, _cloud = full_ladder(settings)
+
+    result = await orchestrator.run(
+        build_context(settings, "Absolutely fantastic, superb service, I love it.")
+    )
+
+    assert local.calls == 1
+    assert result.steps[1].escalated_because is not None
+    assert "low_confidence" in result.steps[1].escalated_because
+    # The scripted LLMs answer `mixed`, so T2 disagrees with T1 and T3 settles it;
+    # either way an LLM decided, not the fallback.
+    assert result.best.tier.rank >= TierId.T2_LOCAL_LLM.rank
+    assert result.degraded is False
+    assert_trace_is_coherent(result)
+
+
+async def test_a_lexicon_verdict_that_has_to_be_returned_is_degraded(
+    settings: Settings,
+) -> None:
+    """With no LLM rung to climb to, the fallback's answer stands — marked degraded."""
+    orchestrator = build_ladder(settings, RulesTier(settings), ClassifierTier(settings))
+
+    result = await orchestrator.run(
+        build_context(settings, "Absolutely fantastic, superb service, I love it.")
+    )
+
+    assert result.best.tier is TierId.T1_CLASSIFIER
+    assert result.best.result.label is Label.POSITIVE
+    assert result.degraded is True
 
 
 async def test_a_contrastive_sentence_climbs_the_whole_ladder(settings: Settings) -> None:

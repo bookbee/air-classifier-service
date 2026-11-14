@@ -18,7 +18,7 @@ import pytest
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 from starlette.responses import Response
 
 from air_classifier_service.api.deps import (
@@ -192,20 +192,21 @@ async def test_blank_header_is_treated_as_missing(memory_cache: MemoryCache) -> 
         await require_api_key(request)
 
 
-async def test_unknown_key_is_forbidden(memory_cache: MemoryCache) -> None:
+async def test_unknown_key_is_unauthenticated(memory_cache: MemoryCache) -> None:
+    """SIT CL-006a: a key that matches nothing did not authenticate — 401, not 403."""
     state = make_state(memory_cache, records=[make_key()])
     request = make_request(state, {HEADER_API_KEY: "airc_not_a_real_key"})
 
-    with pytest.raises(InsufficientScopeError) as exc:
+    with pytest.raises(MissingApiKeyError) as exc:
         await require_api_key(request)
-    assert exc.value.status == 403
+    assert exc.value.status == 401
 
 
-async def test_disabled_key_is_forbidden(memory_cache: MemoryCache) -> None:
+async def test_disabled_key_is_unauthenticated(memory_cache: MemoryCache) -> None:
     state = make_state(memory_cache, records=[make_key(enabled=False)])
     request = make_request(state, {HEADER_API_KEY: RAW_KEY})
 
-    with pytest.raises(InsufficientScopeError):
+    with pytest.raises(MissingApiKeyError):
         await require_api_key(request)
 
 
@@ -213,7 +214,7 @@ async def test_error_messages_never_carry_the_key(memory_cache: MemoryCache) -> 
     state = make_state(memory_cache, records=[make_key()])
     request = make_request(state, {HEADER_API_KEY: RAW_KEY + "-wrong"})
 
-    with pytest.raises(InsufficientScopeError) as exc:
+    with pytest.raises(MissingApiKeyError) as exc:
         await require_api_key(request)
     assert RAW_KEY not in str(exc.value)
     assert RAW_KEY not in repr(exc.value)
@@ -510,6 +511,10 @@ async def test_stored_entry_holds_a_digest_not_the_body(memory_cache: MemoryCach
 # the status from the §9 catalogue, a problem+json body, and the quota headers.
 
 
+class _TypedBody(BaseModel):
+    text: str
+
+
 def build_app(state: AppState) -> FastAPI:
     """Two routes: one plain, one idempotent. Both behind key + quota."""
     app = FastAPI()
@@ -520,6 +525,10 @@ def build_app(state: AppState) -> FastAPI:
     @app.post("/v1/ping")
     async def ping(key: RateLimitedKeyDep) -> dict[str, str]:
         return {"key_id": key.id}
+
+    @app.post("/v1/typed")
+    async def typed(body: _TypedBody, key: RateLimitedKeyDep) -> dict[str, str]:
+        return {"key_id": key.id, "text": body.text}
 
     @app.post("/v1/echo")
     async def echo(request: Request, key: RateLimitedKeyDep) -> Response:
@@ -550,11 +559,48 @@ async def test_http_missing_key_is_401_problem_json(client: TestClient) -> None:
     assert response.json()["type"].endswith("/missing-api-key")
 
 
-async def test_http_unknown_key_is_403(client: TestClient) -> None:
+@pytest.mark.parametrize("headers", [{}, {HEADER_API_KEY: "airc_wrong"}])
+@pytest.mark.parametrize("body", ["{bad", '{"text": 1}'])
+async def test_http_body_errors_are_not_reported_before_authentication(
+    client: TestClient, headers: dict[str, str], body: str
+) -> None:
+    """SIT CL-006b: FastAPI validates the body before dependencies run; we authenticate first."""
+    response = client.post(
+        "/v1/typed", content=body, headers={"Content-Type": "application/json", **headers}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["type"].endswith("/missing-api-key")
+
+
+async def test_http_unparseable_json_from_a_valid_key_is_a_400(client: TestClient) -> None:
+    response = client.post(
+        "/v1/typed",
+        content="{bad",
+        headers={"Content-Type": "application/json", HEADER_API_KEY: RAW_KEY},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["type"].endswith("/malformed-request")
+    assert response.json()["detail"] == "The request body is not valid JSON."
+
+
+async def test_http_schema_errors_from_a_valid_key_stay_a_422(client: TestClient) -> None:
+    response = client.post(
+        "/v1/typed",
+        content='{"text": 1}',
+        headers={"Content-Type": "application/json", HEADER_API_KEY: RAW_KEY},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["type"].endswith("/validation-error")
+
+
+async def test_http_unknown_key_is_401(client: TestClient) -> None:
     response = client.post("/v1/ping", headers={HEADER_API_KEY: "airc_wrong"})
 
-    assert response.status_code == 403
-    assert response.json()["type"].endswith("/insufficient-scope")
+    assert response.status_code == 401
+    assert response.json()["type"].endswith("/missing-api-key")
 
 
 async def test_http_success_carries_quota_headers(client: TestClient) -> None:

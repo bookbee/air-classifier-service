@@ -68,6 +68,10 @@ def build_app(settings: Settings) -> FastAPI:
     async def no_verdict() -> None:
         raise NoVerdictError("every rung failed")
 
+    @app.get("/no-verdict-within-limits")
+    async def no_verdict_within_limits() -> None:
+        raise NoVerdictError("stopped by tier_ceiling", retryable=False, limit="tier_ceiling")
+
     @app.get("/http-exception")
     async def http_exception() -> None:
         raise HTTPException(status_code=415, detail="Unsupported media type")
@@ -214,12 +218,14 @@ async def test_missing_body_is_a_validation_error(client: httpx.AsyncClient) -> 
     assert fields == {"text", "score"}
 
 
-async def test_unparseable_json_is_a_problem(client: httpx.AsyncClient) -> None:
+async def test_unparseable_json_is_a_malformed_request_problem(client: httpx.AsyncClient) -> None:
+    """The §9 catalogue's 400, not a 422 whose detail is a character offset."""
     response = await client.post(
         "/echo", content=b"{not json", headers={"content-type": "application/json"}
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 400
+    assert response.json()["type"] == f"{ERROR_TYPE_BASE}/malformed-request"
     assert response.headers["content-type"] == PROBLEM_CONTENT_TYPE
     assert response.json()["request_id"]
 
@@ -298,6 +304,21 @@ async def test_no_verdict_error_maps_to_503(client: httpx.AsyncClient) -> None:
     assert body["status"] == 503
     # The orchestrator's own message is internal detail; ours is the contract.
     assert "every rung failed" not in response.text
+    assert body["retryable"] is True
+
+
+async def test_a_no_verdict_caused_by_the_callers_limits_is_a_non_retryable_422(
+    client: httpx.AsyncClient,
+) -> None:
+    """SIT CL-003: nothing failed, so nothing will clear on its own."""
+    response = await client.get("/no-verdict-within-limits")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["type"] == f"{ERROR_TYPE_BASE}/no-verdict-within-limits"
+    assert body["retryable"] is False
+    assert "options.max_tier" in body["detail"]
+    assert "Retry-After" not in response.headers
 
 
 # ── The catch-all ─────────────────────────────────────────────────────────────

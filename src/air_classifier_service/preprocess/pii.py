@@ -43,6 +43,15 @@ _URL_CREDENTIALS_RE: Final[re.Pattern[str]] = re.compile(
 #: :func:`luhn_valid` is what decides, not the shape.
 _CARD_RE: Final[re.Pattern[str]] = re.compile(r"(?<![\w-])(?:\d[ -]?){12,18}\d(?![\w-])")
 
+#: ISO 13616 IBAN: country code, two check digits, then 11 to 30 alphanumerics,
+#: printed in groups of four or not at all. Uppercase only — that is how IBANs
+#: are written, and it keeps ordinary words out. :func:`iban_valid` decides.
+_IBAN_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![\w-])[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?(?![\w-])"
+)
+_MIN_IBAN_CHARS: Final[int] = 15
+_MAX_IBAN_CHARS: Final[int] = 34
+
 #: US SSN and UK National Insurance shapes. Both are checksum-free, so the
 #: patterns are kept tight rather than generous.
 _SSN_RE: Final[re.Pattern[str]] = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
@@ -123,6 +132,22 @@ def luhn_valid(digits: str) -> bool:
     return total % 10 == 0
 
 
+def iban_valid(candidate: str) -> bool:
+    """ISO 7064 mod-97 check, the gate on every IBAN-shaped match.
+
+    Move the first four characters to the end, map letters to 10..35, and the
+    whole number must leave a remainder of 1. Random 22-character strings pass
+    about once in 97 times, so a product code that merely looks like an IBAN
+    stays in the text.
+    """
+    compact = candidate.replace(" ", "")
+    if not _MIN_IBAN_CHARS <= len(compact) <= _MAX_IBAN_CHARS:
+        return False
+    rearranged = compact[4:] + compact[:4]
+    numeric = "".join(str(int(char, 36)) for char in rearranged)
+    return int(numeric) % 97 == 1
+
+
 def _is_card(candidate: str) -> bool:
     digits = _DIGITS_RE.sub("", candidate)
     return _MIN_CARD_DIGITS <= len(digits) <= _MAX_CARD_DIGITS and luhn_valid(digits)
@@ -156,11 +181,13 @@ class _Detector:
 
 
 #: Order is behaviour, not taste. Credentialed URLs run before e-mail so that
-#: ``user:pass@host`` is not filed as an address; cards and national IDs run
-#: before phone numbers because every one of them is also phone-shaped.
+#: ``user:pass@host`` is not filed as an address; IBANs, cards and national IDs
+#: run before phone numbers because every one of them is also phone-shaped (an
+#: IBAN used to be redacted, but reported as a phone — SIT CL-006c).
 _DETECTORS: Final[tuple[_Detector, ...]] = (
     _Detector(PIIKind.URL_CREDENTIALS, _URL_CREDENTIALS_RE),
     _Detector(PIIKind.EMAIL, _EMAIL_RE),
+    _Detector(PIIKind.IBAN, _IBAN_RE, iban_valid),
     _Detector(PIIKind.CREDIT_CARD, _CARD_RE, _is_card),
     _Detector(PIIKind.NATIONAL_ID, _SSN_RE),
     _Detector(PIIKind.NATIONAL_ID, _NINO_RE),

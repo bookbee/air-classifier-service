@@ -3,7 +3,7 @@
 {"id": "t0-contentless", "text": "   ", "group": "shortcut", "pin_tier": "t0_rules", "expect_label": "neutral", "note": "Whitespace-only input."}
 {"id": "t0-lexicon-neg", "text": "absolutely terrible", "group": "shortcut", "pin_tier": "t0_rules", "expect_label": "negative", "note": "Lexicon shortcut term."}
 {"id": "t0-lexicon-pos", "text": "absolutely wonderful", "group": "shortcut", "pin_tier": "t0_rules", "expect_label": "positive", "note": "Lexicon shortcut term."}
-{"id": "t0-no-match", "text": "The delivery was scheduled for Tuesday according to the tracking page.", "group": "shortcut", "pin_tier": "t0_rules", "expect_status": 503, "note": "Negative control: no T0 rule fires and nothing else is reachable when pinned. 503 is correct, not a failure."}
+{"id": "t0-no-match", "text": "The delivery was scheduled for Tuesday according to the tracking page.", "group": "shortcut", "pin_tier": "t0_rules", "expect_status": 422, "note": "Negative control: no T0 rule fires and the caller pinned the ladder to T0. Nothing failed, so it is a non-retryable 422 no-verdict-within-limits (SIT CL-003), not a 503."}
 {"id": "t1-pos-1", "text": "Genuinely delighted with this purchase, it works beautifully.", "group": "clear", "pin_tier": "t1_classifier", "expect_label": "positive", "min_confidence": 0.7}
 {"id": "t1-pos-2", "text": "This exceeded every expectation I had. Couldn't be happier.", "group": "clear", "pin_tier": "t1_classifier", "expect_label": "positive", "min_confidence": 0.7}
 {"id": "t1-pos-3", "text": "Fast shipping, great packaging, and the product works exactly as described.", "group": "clear", "pin_tier": "t1_classifier", "expect_label": "positive", "min_confidence": 0.7}

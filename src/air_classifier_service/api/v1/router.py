@@ -156,11 +156,11 @@ ANALYSIS_ERROR_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
     },
     status.HTTP_401_UNAUTHORIZED: {
         "model": ProblemDetail,
-        "description": "No `X-API-Key` header was supplied.",
+        "description": "No `X-API-Key` header, or one that matches no enabled key.",
     },
     status.HTTP_403_FORBIDDEN: {
         "model": ProblemDetail,
-        "description": "The key is unknown, lacks the scope, or forbids the requested options.",
+        "description": "The key is valid but lacks the scope, or forbids the requested options.",
     },
     status.HTTP_409_CONFLICT: {
         "model": ProblemDetail,
@@ -170,7 +170,11 @@ ANALYSIS_ERROR_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
     # the older spelling, and reading it here emitted a warning at import time.
     status.HTTP_422_UNPROCESSABLE_CONTENT: {
         "model": ProblemDetail,
-        "description": "Schema validation failed, or the batch exceeded `max_batch_items`.",
+        "description": (
+            "Schema validation failed, the batch exceeded `max_batch_items`, or "
+            "(`no-verdict-within-limits`) the request's own `max_tier`, `min_tier`, "
+            "`max_cost_usd` or `latency_budget_ms` ruled out every rung that could answer."
+        ),
     },
     status.HTTP_429_TOO_MANY_REQUESTS: {
         "model": ProblemDetail,
@@ -182,7 +186,10 @@ ANALYSIS_ERROR_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
     },
     status.HTTP_503_SERVICE_UNAVAILABLE: {
         "model": ProblemDetail,
-        "description": "Every enabled tier failed to produce a usable verdict.",
+        "description": (
+            "Every rung the ladder tried failed or was unavailable. Retryable; a "
+            "request stopped by its own limits is a 422 instead."
+        ),
     },
 }
 

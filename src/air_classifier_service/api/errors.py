@@ -44,6 +44,7 @@ __all__ = [
     "MalformedRequestError",
     "MissingApiKeyError",
     "NoVerdictAvailableError",
+    "NoVerdictWithinLimitsError",
     "NotFoundError",
     "ProblemResponse",
     "RateLimitedError",
@@ -215,6 +216,22 @@ class NoVerdictAvailableError(AppError):
     retryable = True
 
 
+class NoVerdictWithinLimitsError(AppError):
+    """The caller's own options stopped the ladder before any rung answered.
+
+    Same root as :class:`NoVerdictAvailableError` — no usable verdict — but
+    nothing failed: `max_tier`, `min_tier`, `max_cost_usd` or
+    `latency_budget_ms` ruled out every rung that could have answered. The
+    identical request fails identically, so it is a 422 the caller fixes by
+    relaxing the named limit, never a retryable 5xx (SIT CL-003). Not in
+    ``_BY_STATUS``: 422 already maps to ``validation-error`` there.
+    """
+
+    slug = "no-verdict-within-limits"
+    title = "No verdict within the request's limits"
+    status = 422
+
+
 #: Status → catalogue entry, used to give Starlette's own ``HTTPException``s
 #: (404 from the router, 405 from a method mismatch) the same body shape as ours.
 _BY_STATUS: Final[dict[int, type[AppError]]] = {
@@ -323,16 +340,58 @@ async def _app_error_handler(request: Request, exc: Exception) -> Response:
 
 
 async def _validation_error_handler(request: Request, exc: Exception) -> Response:
-    """Pydantic's per-field failures, flattened into ``errors``."""
+    """Pydantic's per-field failures, flattened into ``errors``.
+
+    FastAPI parses and validates the body *before* it runs a route's
+    dependencies, so without the authentication step below an anonymous caller
+    gets a 422 describing the body — learning that the endpoint parses it, and
+    its schema — instead of the 401 every other unauthenticated request gets
+    (SIT CL-006b). Every route that takes a body or parameters is authenticated,
+    so authenticating here changes the answer only for callers who would have
+    been refused anyway.
+    """
     assert isinstance(exc, RequestValidationError)
-    field_errors = [_as_field_error(raw) for raw in exc.errors()]
+    unauthenticated = await _authentication_failure(request)
+    if unauthenticated is not None:
+        return unauthenticated
+    raw_errors = exc.errors()
+    if any(raw.get("type") == "json_invalid" for raw in raw_errors):
+        # Unparseable is the catalogue's 400, and "1: JSON decode error" (the
+        # character offset, then pydantic's message) tells the caller nothing.
+        return await _app_error_handler(
+            request, MalformedRequestError("The request body is not valid JSON.")
+        )
+    field_errors = [_as_field_error(raw) for raw in raw_errors]
     first = field_errors[0] if field_errors else None
     detail = f"{first.field}: {first.message}" if first and first.message else None
     return await _app_error_handler(request, ValidationError(detail, errors=field_errors))
 
 
+async def _authentication_failure(request: Request) -> Response | None:
+    """The 401 this request would have got had its dependencies run, if any.
+
+    `None` when the caller authenticates, or when the app has no state to
+    authenticate against (a bare app built by hand in tests). Imported lazily:
+    ``api.deps`` imports this module.
+    """
+    from air_classifier_service.api.deps import STATE_ATTR, require_api_key
+
+    if getattr(request.app.state, STATE_ATTR, None) is None:
+        return None
+    try:
+        await require_api_key(request)
+    except AppError as auth_error:
+        return await _app_error_handler(request, auth_error)
+    return None
+
+
 async def _no_verdict_handler(request: Request, exc: Exception) -> Response:
-    """The ladder's only route to a 5xx."""
+    """The ladder's only route to a 5xx — or, when the caller's own limits
+    caused it, a non-retryable 422 that names the limit."""
+    assert isinstance(exc, NoVerdictError)
+    if not exc.retryable:
+        _log.info("request.no_verdict_within_limits", path=_instance(request), limit=exc.limit)
+        return await _app_error_handler(request, NoVerdictWithinLimitsError(exc.limit_detail()))
     _log.error("request.no_verdict", path=_instance(request))
     return await _app_error_handler(
         request, NoVerdictAvailableError("No tier produced a usable verdict.")

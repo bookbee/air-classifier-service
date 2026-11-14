@@ -56,6 +56,13 @@ class TierSettings(BaseModel):
     confidence_floor: float = Field(default=0.80, ge=0.0, le=1.0)
     margin_floor: float = Field(default=0.0, ge=0.0, le=1.0)
     timeout_ms: int = Field(default=1000, ge=1, le=120_000)
+    #: What one call to this rung is expected to cost, checked against the
+    #: caller's remaining `max_cost_usd` *before* the rung runs. The ceiling can
+    #: only be honoured up front — after the call the money is spent — so a paid
+    #: rung needs a conservative estimate here, not its average. Free rungs
+    #: (rules, the local classifier, the local LLM) leave it at 0, which is
+    #: what lets `max_cost_usd: 0` still reach them.
+    expected_cost_usd: float = Field(default=0.0, ge=0.0, le=10.0)
 
 
 # Each rung's defaults live on its own subclass rather than in a
@@ -117,9 +124,19 @@ class T2LocalLlmSettings(TierSettings):
 
 
 class T3CloudLlmSettings(TierSettings):
+    """`expected_cost_usd` covers the primary `auto` call only.
+
+    Measured at the SIT on 2026-11-14: one primary call costs about $0.0039,
+    almost all of it the cached system prompt, whatever the input length.
+    $0.005 leaves headroom for a longer answer or a dearer member of the
+    `auto` chain. The arbiter's second call is gated separately
+    (`model_gateway.arbiter_expected_cost_usd`).
+    """
+
     confidence_floor: float = Field(default=0.65, ge=0.0, le=1.0)
     margin_floor: float = Field(default=0.15, ge=0.0, le=1.0)
     timeout_ms: int = Field(default=8000, ge=1, le=120_000)
+    expected_cost_usd: float = Field(default=0.005, ge=0.0, le=10.0)
 
 
 class TiersSettings(BaseModel):
@@ -223,6 +240,11 @@ class ModelGatewaySettings(BaseModel):
     #: read as a schema-parsing bug rather than what it was.
     max_tokens: int = Field(default=2048, ge=64, le=8192)
     arbiter_max_tokens: int = Field(default=4096, ge=64, le=16384)
+    #: Expected cost of one arbiter call (`cloud` class, the strongest models).
+    #: Checked before the call, like a rung's `expected_cost_usd`, so the
+    #: second opinion cannot push a request past its `max_cost_usd`. At the
+    #: SIT a primary + arbiter pair cost about $0.0148 in total.
+    arbiter_expected_cost_usd: float = Field(default=0.015, ge=0.0, le=10.0)
 
     # Customer-summary narrative refresh (pipeline/summary_service.py): local,
     # like Tier 2, with no fallback on purpose. A failed narrative refresh

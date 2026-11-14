@@ -24,7 +24,13 @@ from air_classifier_service.pipeline.tiers.base import Tier as TierProtocol
 from air_classifier_service.pipeline.tiers.base import TierContext, TierError
 from air_classifier_service.pipeline.tiers.scorers import LEXICON_SCORER_NAME, ScoreResult
 from air_classifier_service.pipeline.tiers.t1_classifier import ClassifierTier
-from air_classifier_service.schemas.common import LanguageInfo, Options, SafetyReport
+from air_classifier_service.schemas.common import (
+    LanguageInfo,
+    Options,
+    SafetyReport,
+    SentimentResult,
+)
+from air_classifier_service.schemas.verdict import TierVerdict
 
 CLEAR_POSITIVE = "Absolutely fantastic, superb service, I love it."
 CLEAR_NEGATIVE = "Absolutely terrible, broken on arrival, a total waste of money."
@@ -88,16 +94,55 @@ def with_classifier(settings: Settings, **kw: object) -> Settings:
     ("text", "expected"),
     [(CLEAR_POSITIVE, Label.POSITIVE), (CLEAR_NEGATIVE, Label.NEGATIVE)],
 )
-async def test_unambiguous_text_is_decided_confidently(
+async def test_the_lexicon_fallback_labels_clear_text_but_never_clears_the_floor(
     settings: Settings, text: str, expected: Label
 ) -> None:
+    """SIT CL-005: the fallback is a word count, not a model, so it never stops the ladder.
+
+    Right label, wide margin — but its confidence is held just below the floor,
+    so the policy hands it to an LLM rung, and the verdict is flagged as a
+    fallback so a response it decides is marked degraded.
+    """
     floors = settings.tiers.t1_classifier
+    tier = ClassifierTier(settings)  # no ONNX artifact in tests: the lexicon
+    verdict = await tier.analyse(make_context(text))
+
+    assert tier.model_version == LEXICON_SCORER_NAME
+    assert verdict.result.label is expected
+    assert verdict.result.confidence < floors.confidence_floor
+    assert verdict.label_margin >= floors.margin_floor
+    assert verdict.fallback is True
+    assert verdict.succeeded is True
+
+
+async def test_the_lexicon_fallback_does_not_cap_sarcasm_into_confidence(
+    settings: Settings,
+) -> None:
+    """The SIT repro: word-level "great"/"fantastic" must not stop the ladder."""
+    text = "Oh great, another 'premium' delivery that took two weeks. Just fantastic."
     verdict = await ClassifierTier(settings).analyse(make_context(text))
 
-    assert verdict.result.label is expected
-    assert verdict.result.confidence >= floors.confidence_floor
-    assert verdict.label_margin >= floors.margin_floor
-    assert verdict.succeeded is True
+    assert verdict.result.confidence < settings.tiers.t1_classifier.confidence_floor
+
+
+async def test_tier0_agreement_lifts_the_fallback_cap(settings: Settings) -> None:
+    """Two independent word-level signals agreeing is the corroboration the cap asks for."""
+    ctx = make_context(CLEAR_POSITIVE)
+    t0 = TierVerdict(
+        tier=TierId.T0_RULES,
+        result=SentimentResult(label=Label.POSITIVE, polarity=0.9, confidence=0.9),
+    )
+    verdict = await ClassifierTier(settings).analyse(ctx.with_verdict(t0))
+
+    assert verdict.result.confidence >= settings.tiers.t1_classifier.confidence_floor
+
+
+async def test_a_model_backend_is_never_capped(settings: Settings) -> None:
+    scorer = StubScorer({Label.POSITIVE: 0.97, Label.NEGATIVE: 0.01, Label.NEUTRAL: 0.02})
+    verdict = await ClassifierTier(settings, scorer=scorer).analyse(make_context(CLEAR_POSITIVE))
+
+    assert verdict.result.confidence >= settings.tiers.t1_classifier.confidence_floor
+    assert verdict.fallback is False
 
 
 @pytest.mark.parametrize("text", [CONTRASTIVE, CONTRASTIVE_LONG])

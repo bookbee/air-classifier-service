@@ -561,12 +561,25 @@ class AnalysisService:
     async def _store(self, key: str, result: OrchestrationResult) -> None:
         """Persist a ladder result for reuse.
 
-        Degraded results are deliberately not stored: a provider blip lasts
-        seconds, and pinning the fallback answer for the whole TTL would turn a
-        momentary outage into an hour of worse verdicts.
+        A degraded result the ladder was *stuck with* is deliberately not
+        stored: a provider blip lasts seconds, and pinning the fallback answer
+        for the whole TTL would turn a momentary outage into an hour of worse
+        verdicts.
+
+        A degraded result that is nonetheless `settled` — a dead rung was
+        hopped, but the rung that decided met its own floor — is stored. Its
+        answer is no worse for the outage, and refusing it meant that while T2
+        was down every repeat paid for T3 again (SIT CL-006i regression). It is
+        stored with `degraded` cleared: `degraded` describes the response that
+        lived through the outage, and a later hit that touches no dependency
+        must not report one. The trace still shows the hop.
         """
-        if self._cache is None or result.degraded:
+        if self._cache is None:
             return
+        if result.degraded:
+            if not result.settled:
+                return
+            result = result.model_copy(update={"degraded": False})
         await self._cache.set(key, result.model_dump_json(), self._settings.cache.ttl_seconds)
 
     async def _record_audit(
@@ -617,6 +630,17 @@ class AnalysisService:
         if rendered is not None:
             return rendered
         if isinstance(exc, NoVerdictError):
+            # Mirrors the single-call mapping in api/errors.py (SIT CL-003): a
+            # ladder stopped by the item's own limits is a non-retryable 422.
+            if not exc.retryable:
+                return ProblemDetail.build(
+                    slug="no-verdict-within-limits",
+                    title="No verdict within the request's limits",
+                    status=422,
+                    detail=exc.limit_detail(),
+                    instance=instance,
+                    request_id=request_id,
+                )
             return ProblemDetail.build(
                 slug="no-verdict",
                 title="No tier produced a verdict",
@@ -624,6 +648,7 @@ class AnalysisService:
                 detail=str(exc),
                 instance=instance,
                 request_id=request_id,
+                retryable=True,
             )
         if isinstance(exc, ValidationError):
             return ProblemDetail.build(
@@ -764,7 +789,13 @@ def _shape(
         # not want on every response — never because it would reveal anything.
         escalation_trace=list(result.steps) if include_trace else [],
         safety=prepared.safety,
-        usage=RequestUsage(
+        # `usage` is what *this* request ran and spent. A cache hit ran no tier
+        # and spent nothing; reporting the original call's usage again made a
+        # caller summing `est_cost_usd` count every hit as a fresh spend (SIT
+        # CL-006h). The trace still shows how the cached verdict was reached.
+        usage=RequestUsage()
+        if cached
+        else RequestUsage(
             tiers_run=len(result.verdicts),
             tokens_in=total.tokens_in,
             tokens_out=total.tokens_out,

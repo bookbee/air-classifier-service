@@ -437,15 +437,17 @@ class EscalationDecision(BaseModel):
     reasons: list[str] = []      # stable reason codes, exported as metric labels
 ```
 
-Hard limits are evaluated first and short-circuit. The quality rules are then all
-evaluated together, accumulating reasons. Availability is checked **last**, deliberately —
-see the note below the table.
+The tier ceiling and latency budget are evaluated first and short-circuit. The quality rules
+are then all evaluated together, accumulating reasons. Availability and then cost are
+checked **last**, deliberately: both depend on which rung is next, and both should only be
+reported when the ladder wanted to climb (see the note below the table). Cost is a pre-call
+estimate per rung (`tiers.<rung>.expected_cost_usd`); the orchestrator also asks the policy
+before running the *first* rung, which rule 3 alone never sees.
 
 | # | Condition | Outcome |
 | --- | --- | --- |
 | 1 | `verdict.tier == max_tier` | **stop** — ceiling reached |
 | 2 | Latency budget exhausted (`now > deadline`) | **stop** (`budget_exhausted`) |
-| 3 | `cost_spent >= max_cost_usd` | **stop** (`cost_ceiling`) |
 | 5 | `min_tier` not yet reached | escalate (`min_tier_floor`) |
 | 6 | Verdict failed, or abstained | escalate (`tier_failed` / `no_shortcut_matched`) |
 | 7 | `confidence < floor[tier]` | escalate (`low_confidence`) |
@@ -455,6 +457,7 @@ see the note below the table.
 | 11 | Language unsupported by the deciding tier | escalate (`unsupported_language`) |
 | — | no reason to climb | **stop** (`confident`) |
 | 4 | wanted to climb, but nothing further up the ladder can serve | **stop** (`next_tier_unavailable`) |
+| 3 | wanted to climb, but `cost_spent + expected_cost(next rung) > max_cost_usd` | **stop** (`cost_ceiling`, plus the quality reasons) |
 
 Rule 4 runs last on purpose: the quality rules (5–11) are pure computation and cost nothing
 to evaluate, so checking them first is what lets `next_tier_unavailable` mean what it says —
@@ -736,14 +739,15 @@ Root span per request; child spans `preprocess`, `tier.{name}`, `provider.{name}
 | Status | Type slug | Raised when |
 | --- | --- | --- |
 | 400 | `malformed-request` | Unparseable body, oversized payload |
-| 401 | `missing-api-key` | No `X-API-Key` header |
-| 403 | `insufficient-scope` | Key lacks the scope, or requests a tier above its ceiling |
+| 401 | `missing-api-key` | No `X-API-Key` header, or one that matches no enabled key |
+| 403 | `insufficient-scope` | An authenticated key lacks the scope, or requests a tier above its ceiling |
 | 404 | `not-found` | Unknown route |
 | 409 | `idempotency-conflict` | Same key, different body |
 | 422 | `validation-error` | Pydantic validation failure |
+| 422 | `no-verdict-within-limits` | Nothing failed, but the request's own `max_tier` / `min_tier` / `max_cost_usd` / `latency_budget_ms` ruled out every rung that could answer; not retryable |
 | 429 | `rate-limited` | Quota exhausted; includes `Retry-After` |
 | 500 | `internal-error` | Unhandled — should be alert-worthy and rare |
-| 503 | `no-verdict` | Every enabled tier failed |
+| 503 | `no-verdict` | Every rung the ladder tried failed or was unavailable; retryable |
 
 Note what is *absent*: there is no "provider unavailable" error surfaced to callers. A cloud
 outage produces a `200` with `degraded: true` and a lower-tier verdict. The same holds for
@@ -787,6 +791,34 @@ deliberate: it pins the ladder's semantics while they are still cheap to change.
 
 Corrections to this document worth leaving a trace of, newest first. Each entry says what
 changed and why; the *current* behaviour is described in the sections above, not here.
+
+- **Platform SIT fixes (CL-001…CL-006), 2026-11-14.** Found by air-web-console's SIT
+  against `d151e5c`.
+  - *The cost ceiling is priced before a rung runs* (CL-001). Rule 3 compared only money
+    already spent, so before T3 it was always `0 < max_cost_usd` and any ceiling below one
+    T3 call (~$0.004) was exceeded. Each rung now has `tiers.<rung>.expected_cost_usd`
+    (0 for T0–T2, $0.005 for T3; the arbiter has `model_gateway.arbiter_expected_cost_usd`,
+    $0.015). Rule 3 stops a climb when `spent + expected(next) > max_cost_usd`, and the
+    orchestrator asks `policy.can_afford()` before *every* rung, so a request pinned to T3
+    is priced too. Rule 3 moved below the quality rules (with rule 4), because it depends
+    on which rung is next and should only fire when the ladder wanted to climb.
+    `cost_ceiling` is now a visible stop reason in the trace, with the quality reasons that
+    were refused. A stop on the caller's own ceiling is not `degraded`.
+  - *`max_cost_usd: 0` reaches the free rungs* (CL-002), which follows from the above.
+  - *"No verdict" because of the caller's own limits is a non-retryable 422*
+    `no-verdict-within-limits` naming the option (CL-003). The 503 `no-verdict` is now
+    only for ladders where a rung failed or was unavailable, and is `retryable: true` in
+    batch items too (it was `false` there).
+  - *Lexicon-only Tier 1 can no longer stop the ladder* (CL-005): without the ONNX artifact
+    its confidence is held just below T1's floor unless T0 agreed on the label, and a
+    verdict it decides is marked `degraded`.
+  - *Smaller items* (CL-006). An unknown or disabled key is a 401 `missing-api-key`, not a
+    403. Body errors are reported only after authentication, and unparseable JSON is a 400
+    `malformed-request`. IBANs are their own PII kind (`iban`, mod-97 checked). Blank
+    `options.aspects` entries are a 422. Zero-confidence topics are dropped. An inconsistent
+    `existing_summary.rollup` is a 422. The summary response has `degraded_reason`. A cache
+    hit reports zero `usage`. A rung the lookahead skipped as unavailable marks the answer
+    `degraded`, the same as one whose call failed.
 
 - **Renamed air-llm → air-model-gateway throughout, 2026-11-13.** Follows the move to
   `/v1/generate` below, and air-model-gateway's own request that consumers drop the old

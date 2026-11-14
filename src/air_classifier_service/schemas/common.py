@@ -7,9 +7,9 @@ module — none of them is maintained by hand alongside it.
 
 from __future__ import annotations
 
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from air_classifier_service.constants import Label, PIIKind, RatingAgreement, Tier
 
@@ -201,10 +201,15 @@ class Options(BaseModel):
     max_cost_usd: float = Field(default=0.05, ge=0.0, le=10.0)
     include_trace: bool = True
     redact_pii: bool = True
-    aspects: list[str] | None = Field(
-        default=None,
-        max_length=20,
-        description="Aspects to score explicitly, when the text has any.",
+    #: Each name must carry at least one non-blank character: an empty aspect
+    #: is a 422 like an empty `text` (SIT CL-006d), not a prompt slot the model
+    #: has to guess a meaning for.
+    aspects: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]] | None = (
+        Field(
+            default=None,
+            max_length=20,
+            description="Aspects to score explicitly, when the text has any.",
+        )
     )
 
     @model_validator(mode="after")
