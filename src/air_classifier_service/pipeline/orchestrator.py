@@ -63,10 +63,40 @@ _log = get_logger(__name__)
 class NoVerdictError(Exception):
     """No rung produced a usable answer.
 
-    The single path to a 5xx in this service. A provider outage does not raise
-    it — that is a lower rung's verdict with ``degraded=true``. Only an empty
-    ladder, or one where every rung failed or abstained, gets here.
+    A provider outage does not raise it — that is a lower rung's verdict with
+    ``degraded=true``. Only an empty ladder, or one where every rung failed or
+    abstained, gets here.
+
+    It has two causes that a caller must be able to tell apart (SIT CL-003):
+
+    * ``retryable=True`` — a rung failed or was unavailable on the way. That can
+      clear on its own: the 503 the HTTP layer renders it as.
+    * ``retryable=False`` — nothing failed; the caller's own options (`max_tier`,
+      `min_tier`, `max_cost_usd`, `latency_budget_ms`) stopped the ladder before
+      any rung could answer. The same request fails the same way every time, so
+      it is a 422 naming the ``limit`` instead of a 5xx anyone retries or pages on.
     """
+
+    def __init__(self, message: str, *, retryable: bool = True, limit: str | None = None) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        #: The option-derived stop that left the ladder empty-handed, when
+        #: ``retryable`` is false: an :class:`EscalationReason` value, or
+        #: ``"tier_bounds"`` when `min_tier`/`max_tier` exclude every enabled rung.
+        self.limit = limit
+
+    def limit_detail(self) -> str:
+        """A caller-facing detail naming the option to relax."""
+        hint = _LIMIT_HINTS.get(self.limit or "", "the request's options")
+        return f"No tier could produce a verdict within {hint}. Relax it and resend."
+
+
+_LIMIT_HINTS: dict[str, str] = {
+    "tier_ceiling": "options.max_tier",
+    "tier_bounds": "options.min_tier/options.max_tier",
+    "cost_ceiling": "options.max_cost_usd",
+    "budget_exhausted": "options.latency_budget_ms",
+}
 
 
 class Orchestrator:
@@ -85,6 +115,12 @@ class Orchestrator:
         verdicts: list[TierVerdict] = []
         steps: list[EscalationStep] = []
         degraded = False
+        # The caller-imposed stop that ended the ladder, if one did — what a
+        # `NoVerdictError` names when nothing failed on the way.
+        limit: str | None = None if ladder else "tier_bounds"
+
+        # The decision taken on the last rung that ran — what `settled` reads.
+        last_reason: EscalationReason | None = None
 
         position = 0
         while position < len(ladder):
@@ -95,6 +131,20 @@ class Orchestrator:
                 _log.warning(
                     "tier.skipped", request_id=ctx.request_id, tier=tier.tier.value, reason="budget"
                 )
+                limit = EscalationReason.BUDGET_EXHAUSTED.value
+                break
+            if not self._policy.can_afford(tier.tier, ctx):
+                # Only reachable for the first rung run: every later one was
+                # already priced by the policy before it said "climb".
+                _log.info(
+                    "tier.skipped",
+                    request_id=ctx.request_id,
+                    tier=tier.tier.value,
+                    reason="cost_ceiling",
+                    expected_cost_usd=self._policy.expected_cost_usd(tier.tier),
+                    max_cost_usd=ctx.options.max_cost_usd,
+                )
+                limit = EscalationReason.COST_CEILING.value
                 break
 
             async with span(
@@ -117,9 +167,15 @@ class Orchestrator:
             next_position = await self._next_available_position(ladder, position + 1)
             next_tier = ladder[next_position] if next_position is not None else None
             decision = self._policy.decide(
-                verdict, ctx, next_available=next_tier is not None
+                verdict,
+                ctx,
+                next_available=next_tier is not None,
+                next_cost_usd=(
+                    self._policy.expected_cost_usd(next_tier.tier) if next_tier is not None else 0.0
+                ),
             )
             steps.append(EscalationStep.build(verdict, decision))
+            last_reason = decision.primary_reason
             record_tier_decision(tier.tier, _outcome_of(verdict, escalate=decision.escalate))
             _log.info(
                 "tier.decision",
@@ -158,6 +214,8 @@ class Orchestrator:
                 )
 
             if not decision.escalate:
+                if decision.primary_reason in _CALLER_LIMITS:
+                    limit = decision.primary_reason.value
                 break
             # The policy only escalates when the lookahead found a servable rung,
             # so both are guaranteed here — this is not a second check.
@@ -166,6 +224,13 @@ class Orchestrator:
             for reason in decision.reasons:
                 record_escalation(tier.tier, next_tier.tier, reason)
             for skipped in ladder[position + 1 : next_position]:
+                # A rung the ladder wanted and could not use, because it was
+                # down, is the same outage whether its call failed or the
+                # lookahead stepped over it — so it marks the answer degraded
+                # either way (SIT CL-006i). Before this, a T2 whose gateway call
+                # failed made the response degraded but a T2 the probe already
+                # knew was down did not.
+                degraded = True
                 _log.warning(
                     "tier.skipped",
                     request_id=ctx.request_id,
@@ -176,10 +241,29 @@ class Orchestrator:
 
         best = self._policy.select_best(verdicts)
         if best is None:
-            raise NoVerdictError(f"no usable verdict after {len(verdicts)} of {len(ladder)} tiers")
+            message = f"no usable verdict after {len(verdicts)} of {len(ladder)} tiers"
+            if degraded or limit is None:
+                raise NoVerdictError(message, retryable=True)
+            raise NoVerdictError(f"{message}; stopped by {limit}", retryable=False, limit=limit)
 
         record_decided_by(best.tier)
-        return OrchestrationResult(best=best, verdicts=verdicts, steps=steps, degraded=degraded)
+        # Settled: the answer meets its own rung's floors, and the ladder did not
+        # stop *short* of where it wanted to be — no later rung was tried and
+        # failed, and it did not stop for want of one. A result that is degraded
+        # only because a dead rung was hopped on the way is still settled.
+        settled = (
+            best is verdicts[-1]
+            and not best.fallback
+            and last_reason is not EscalationReason.NEXT_TIER_UNAVAILABLE
+            and self._policy.is_settled(best)
+        )
+        return OrchestrationResult(
+            best=best,
+            verdicts=verdicts,
+            steps=steps,
+            degraded=degraded or best.fallback,
+            settled=settled,
+        )
 
     # ── Internals ─────────────────────────────────────────────────────────────
 
@@ -261,6 +345,17 @@ class Orchestrator:
         except Exception as exc:
             _log.warning("tier.probe_failed", tier=tier.tier.value, error=str(exc))
             return False
+
+
+#: Stops the caller's own options cause. A ladder that ends empty-handed on one
+#: of these, with nothing failing on the way, fails the same way every time.
+_CALLER_LIMITS: frozenset[EscalationReason] = frozenset(
+    {
+        EscalationReason.TIER_CEILING,
+        EscalationReason.BUDGET_EXHAUSTED,
+        EscalationReason.COST_CEILING,
+    }
+)
 
 
 def _outcome_of(verdict: TierVerdict, *, escalate: bool) -> TierOutcome:

@@ -48,6 +48,9 @@ __all__ = ["ClassifierTier"]
 
 _log = get_logger(__name__)
 
+#: How far below Tier 1's confidence floor a lexicon-only verdict is held.
+_FALLBACK_FLOOR_GAP: Final[float] = 0.01
+
 
 class ClassifierTier:
     """Statistical sentiment classification over a pluggable backend."""
@@ -68,6 +71,8 @@ class ClassifierTier:
         # visible in every response's `model_versions`, not only in a boot log
         # nobody reads three weeks later.
         self.model_version = self._scorer.name
+        # Running on the lexicon *instead of* a model: see `_cap_fallback_confidence`.
+        self._fallback = isinstance(self._scorer, LexiconScorer)
         self._languages = frozenset(
             code.strip().lower() for code in self._config.supported_languages
         )
@@ -113,6 +118,9 @@ class ClassifierTier:
         latency_ms = (time.perf_counter() - started) * 1000.0
         positive = score.probabilities[Label.POSITIVE]
         negative = score.probabilities[Label.NEGATIVE]
+        confidence = score.confidence
+        if self._fallback:
+            confidence = self._cap_fallback_confidence(confidence, score.top_label, ctx)
 
         _log.debug(
             "tier.t1.scored",
@@ -133,7 +141,7 @@ class ClassifierTier:
                 # Valence as the distribution states it: the mass behind
                 # "positive" less the mass behind "negative".
                 polarity=min(1.0, max(-1.0, positive - negative)),
-                confidence=score.confidence,
+                confidence=confidence,
             ),
             label_margin=score.margin,
             language_code=ctx.language.code,
@@ -142,7 +150,30 @@ class ClassifierTier:
                 "backend": self._scorer.name,
                 "blended": "true" if self._blend_weight > 0.0 else "false",
             },
+            fallback=self._fallback,
         )
+
+    def _cap_fallback_confidence(self, confidence: float, label: Label, ctx: TierContext) -> float:
+        """Hold a lexicon-only verdict just below this rung's floor.
+
+        The lexicon is the emergency backend, not a model: it counts words, so
+        "Oh great, another 'premium' delivery... Just fantastic." scores
+        `positive` at 0.92 (SIT CL-005) and would clear the floor and stop the
+        ladder with a confidently wrong answer. Capping below the floor makes
+        the policy send every such verdict on to an LLM rung; when none can
+        serve, rule 4 returns it anyway with `degraded: true`.
+
+        One exception: Tier 0 already committed to the same label. Two
+        independent word-level signals agreeing is the corroboration the cap
+        exists to demand.
+        """
+        cap = max(0.0, self._settings.tiers.t1_classifier.confidence_floor - _FALLBACK_FLOOR_GAP)
+        if confidence <= cap:
+            return confidence
+        for prior in ctx.prior_verdicts:
+            if prior.tier is TierId.T0_RULES and prior.is_usable and prior.result.label is label:
+                return confidence
+        return cap
 
     def _score_blocking(self, text: str) -> ScoreResult:
         """The whole synchronous pipeline, run once in a worker thread.

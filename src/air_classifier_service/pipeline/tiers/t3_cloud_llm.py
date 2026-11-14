@@ -212,13 +212,20 @@ class CloudLLMTier:
         if ctx.budget_exhausted:
             logger.info("t3.arbitration_skipped", reason="budget_exhausted")
             return False
-        # The policy's cost ceiling applies between rungs, which is one call too
-        # late for a rung that makes two: the spend the first call has *already*
-        # incurred is checked here so the arbiter cannot push a request past a
-        # ceiling the caller set.
+        # The policy prices a rung before it runs, which covers this rung's first
+        # call but not its second. The arbiter is priced the same way here —
+        # what has been spent plus what the arbiter is expected to cost — so the
+        # second opinion cannot push a request past a ceiling the caller set
+        # (SIT CL-001: checking only the spend so far let it through every time).
         spent = ctx.cost_spent_usd + primary.cost_usd
-        if spent >= ctx.options.max_cost_usd:
-            logger.info("t3.arbitration_skipped", reason="cost_ceiling", spent_usd=spent)
+        expected = config.arbiter_expected_cost_usd
+        if spent + expected > ctx.options.max_cost_usd:
+            logger.info(
+                "t3.arbitration_skipped",
+                reason="cost_ceiling",
+                spent_usd=spent,
+                expected_usd=expected,
+            )
             return False
         return True
 

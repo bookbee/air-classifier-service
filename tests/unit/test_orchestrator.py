@@ -258,6 +258,86 @@ async def test_the_cost_ceiling_stops_the_ladder() -> None:
     assert result.best.tier is Tier.T0_RULES
 
 
+async def test_a_paid_rung_over_the_ceiling_is_never_called() -> None:
+    """SIT CL-001: priced before the call, not discovered on the invoice."""
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=unsure(Tier.T1_CLASSIFIER))
+    t3 = FakeTier(tier=Tier.T3_CLOUD_LLM, verdict=verdict(Tier.T3_CLOUD_LLM, cost_usd=0.004))
+
+    result = await build(t1, t3).run(make_ctx(options=Options(max_cost_usd=0.001)))
+
+    assert t3.calls == 0
+    assert result.best.tier is Tier.T1_CLASSIFIER
+    assert result.degraded is False  # the caller's own limit, not an outage
+    assert (result.steps[-1].escalated_because or "").startswith("cost_ceiling")
+
+
+async def test_a_pinned_paid_rung_over_the_ceiling_is_a_limits_no_verdict() -> None:
+    """`min_tier: t3` never *climbs* into T3, so the first rung is priced too."""
+    t3 = FakeTier(tier=Tier.T3_CLOUD_LLM, verdict=verdict(Tier.T3_CLOUD_LLM))
+
+    with pytest.raises(NoVerdictError) as raised:
+        await build(t3).run(
+            make_ctx(options=Options(min_tier=Tier.T3_CLOUD_LLM, max_cost_usd=0.001))
+        )
+
+    assert t3.calls == 0
+    assert raised.value.retryable is False
+    assert raised.value.limit == "cost_ceiling"
+
+
+async def test_a_zero_ceiling_still_runs_the_free_rungs() -> None:
+    """SIT CL-002: T0 abstains, T1 is free and answers; T3 is never priced in."""
+    t0 = FakeTier(tier=Tier.T0_RULES)
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=unsure(Tier.T1_CLASSIFIER))
+    t3 = FakeTier(tier=Tier.T3_CLOUD_LLM, verdict=verdict(Tier.T3_CLOUD_LLM))
+
+    result = await build(t0, t1, t3).run(make_ctx(options=Options(max_cost_usd=0.0)))
+
+    assert (t0.calls, t1.calls, t3.calls) == (1, 1, 0)
+    assert result.best.tier is Tier.T1_CLASSIFIER
+    assert result.total_usage.cost_usd == 0.0
+
+
+# ── Why there was no verdict ──────────────────────────────────────────────────
+
+
+async def test_a_caller_ceiling_with_no_answer_is_not_retryable() -> None:
+    """SIT CL-003: the same request fails the same way every time."""
+    t0 = FakeTier(tier=Tier.T0_RULES)
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=verdict(Tier.T1_CLASSIFIER))
+
+    with pytest.raises(NoVerdictError) as raised:
+        await build(t0, t1).run(make_ctx(options=Options(max_tier=Tier.T0_RULES)))
+
+    assert raised.value.retryable is False
+    assert raised.value.limit == "tier_ceiling"
+    assert "options.max_tier" in raised.value.limit_detail()
+
+
+async def test_an_outage_with_no_answer_stays_retryable() -> None:
+    t0 = FakeTier(tier=Tier.T0_RULES)
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, raises=TierUnavailableError("breaker open"))
+
+    with pytest.raises(NoVerdictError) as raised:
+        await build(t0, t1).run(make_ctx(options=Options(max_tier=Tier.T1_CLASSIFIER)))
+
+    assert raised.value.retryable is True
+
+
+async def test_bounds_that_exclude_every_rung_are_a_limits_no_verdict() -> None:
+    t0 = FakeTier(tier=Tier.T0_RULES, verdict=verdict(Tier.T0_RULES))
+    settings = tuned_settings()
+    settings.tiers.t2_local_llm.enabled = False
+
+    with pytest.raises(NoVerdictError) as raised:
+        await build(t0, settings=settings).run(
+            make_ctx(options=Options(min_tier=Tier.T2_LOCAL_LLM, max_tier=Tier.T2_LOCAL_LLM))
+        )
+
+    assert raised.value.retryable is False
+    assert raised.value.limit == "tier_bounds"
+
+
 # ── Budget ────────────────────────────────────────────────────────────────────
 
 
@@ -384,6 +464,62 @@ async def test_an_unavailable_next_rung_stops_the_ladder_early() -> None:
     assert result.best.tier is Tier.T0_RULES
     assert result.steps[-1].escalated_because == "next_tier_unavailable"
     assert result.degraded is True
+
+
+async def test_a_dead_rung_is_hopped_and_the_answer_is_marked_degraded() -> None:
+    """SIT CL-006i: an unavailable T2 is the same outage as a failing one.
+
+    The lookahead hops it to reach T3, which answers; the answer is still
+    marked degraded, because the ladder wanted a rung that was down — exactly
+    what a T2 whose call failed already reported.
+    """
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=unsure(Tier.T1_CLASSIFIER))
+    t2 = FakeTier(tier=Tier.T2_LOCAL_LLM, verdict=verdict(Tier.T2_LOCAL_LLM), available=False)
+    t3 = FakeTier(tier=Tier.T3_CLOUD_LLM, verdict=verdict(Tier.T3_CLOUD_LLM))
+
+    result = await build(t1, t2, t3).run(make_ctx())
+
+    assert (t2.calls, t3.calls) == (0, 1)
+    assert result.best.tier is Tier.T3_CLOUD_LLM
+    assert result.degraded is True
+    # ...but settled: T3 met its own floor, so the answer is cacheable.
+    assert result.settled is True
+
+
+async def test_stopping_with_nowhere_to_climb_is_not_settled() -> None:
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=unsure(Tier.T1_CLASSIFIER))
+    t2 = FakeTier(tier=Tier.T2_LOCAL_LLM, verdict=verdict(Tier.T2_LOCAL_LLM), available=False)
+
+    result = await build(t1, t2).run(make_ctx())
+
+    assert result.degraded is True
+    assert result.settled is False
+
+
+async def test_a_good_answer_below_a_failed_rung_is_not_settled() -> None:
+    """T2 met its floors but disagreed with T1, so it wanted T3 — which failed."""
+    t1 = FakeTier(
+        tier=Tier.T1_CLASSIFIER,
+        verdict=verdict(Tier.T1_CLASSIFIER, label=Label.NEGATIVE, confidence=0.4, margin=0.05),
+    )
+    t2 = FakeTier(tier=Tier.T2_LOCAL_LLM, verdict=verdict(Tier.T2_LOCAL_LLM))
+    t3 = FakeTier(tier=Tier.T3_CLOUD_LLM, raises=TierError("down"))
+
+    result = await build(t1, t2, t3).run(make_ctx(options=Options(min_tier=Tier.T1_CLASSIFIER)))
+
+    assert t3.calls == 1
+
+    assert result.best.tier is Tier.T2_LOCAL_LLM
+    assert result.settled is False
+
+
+async def test_a_fallback_answer_is_never_settled() -> None:
+    lexicon_only = verdict(Tier.T1_CLASSIFIER).model_copy(update={"fallback": True})
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=lexicon_only)
+
+    result = await build(t1).run(make_ctx(options=Options(max_tier=Tier.T1_CLASSIFIER)))
+
+    assert result.settled is False
 
 
 async def test_a_probe_that_raises_counts_as_unavailable() -> None:

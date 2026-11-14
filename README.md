@@ -36,7 +36,9 @@ Rules every engineer should know:
   `# Derivations`). `tone`, `topics` and `intent` need real language understanding, so they
   are populated only when the ladder reaches T2 or T3 (`options.min_tier` guarantees that).
 - **Failure degrades, it never errors.** A tier failure returns the best lower-tier verdict
-  with `degraded: true`. The only 503 is "no tier produced anything" (`no-verdict`).
+  with `degraded: true`. The only 503 is "no tier produced anything" (`no-verdict`), and
+  only when something failed on the way; a request whose own limits rule out every rung
+  that could answer gets a non-retryable 422 (`no-verdict-within-limits`).
 - **Every escalation decision lives in one place**, `pipeline/policy.py::EscalationPolicy`,
   checked in a fixed order: hard ceilings (tier ceiling, latency budget, cost budget), then
   quality checks (confidence floor, margin floor, complexity triggers, tier disagreement,
@@ -161,7 +163,10 @@ the gateway), `Idempotency-Key` (optional; a repeat with a different body is a 4
 
 Useful request options (`"options": {…}`): `min_tier` / `max_tier` pin or cap the ladder
 (`"max_tier": "t2_local_llm"` keeps every byte on your own hardware), `max_cost_usd` caps spend
-per request (default $0.05), `include_trace` (default `true`). Pass `rating` /
+per request (default $0.05; `0` means free tiers only). The cap is enforced *before* each paid
+call, against that rung's configured `expected_cost_usd` (T3 $0.005, arbiter $0.015), so a
+rung that might overshoot is not attempted and the trace shows `cost_ceiling`.
+`include_trace` (default `true`). Pass `rating` /
 `rating_scale_max` for `rating_consistency`, or `channel` to sharpen `urgency`.
 
 ```jsonc
@@ -195,14 +200,15 @@ per request (default $0.05), `include_trace` (default `true`). Pass `rating` /
 | Status | Type | When |
 | --- | --- | --- |
 | 400 | `malformed-request` | Unparseable or oversized body (`APP__MAX_BODY_BYTES`, 1 MiB) |
-| 401 | `missing-api-key` | No `X-API-Key` |
-| 403 | `insufficient-scope` | Key lacks the scope, or asks for a tier above its `max_tier` |
+| 401 | `missing-api-key` | No `X-API-Key`, or one that matches no enabled key |
+| 403 | `insufficient-scope` | A valid key lacks the scope, or asks for a tier above its `max_tier` |
 | 404 | `not-found` | Unknown route |
 | 409 | `idempotency-conflict` | Same `Idempotency-Key`, different body |
 | 422 | `validation-error` | Request fails validation |
 | 429 | `rate-limited` | Per-key quota exhausted; carries `Retry-After` |
 | 500 | `internal-error` | Unhandled; should be rare and alert-worthy |
-| 503 | `no-verdict` | Every enabled tier failed |
+| 422 | `no-verdict-within-limits` | Nothing failed, but the request's own `max_tier`, `min_tier`, `max_cost_usd` or `latency_budget_ms` ruled out every rung that could answer; the detail names the option. Not retryable as sent |
+| 503 | `no-verdict` | Every rung the ladder tried failed or was unavailable; retryable |
 
 ## Customer summary refresh
 
@@ -424,7 +430,8 @@ Both `make run` and `make up` pick up `./models`.
 (`min_tier` = `max_tier`) so the verdict cannot have come from anywhere else. Sections: `t0`,
 `t1`, `t2`, `t3`, `nat` (unpinned) and `climb` (forces all four rungs). Before Tier 2 it warms
 the local model through the gateway with the gateway's response cache bypassed. The script
-also contains two negative controls that expect a `503`.
+also contains two negative controls: a T0-pinned text no rule matches (`422`) and, with no
+cloud access configured, a T3-pinned request (`503`).
 
 | Tier | Sample text |
 | --- | --- |

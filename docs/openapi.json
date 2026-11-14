@@ -152,7 +152,7 @@
             }
           },
           "401": {
-            "description": "No `X-API-Key` header was supplied.",
+            "description": "No `X-API-Key` header, or one that matches no enabled key.",
             "content": {
               "application/json": {
                 "schema": {
@@ -162,7 +162,7 @@
             }
           },
           "403": {
-            "description": "The key is unknown, lacks the scope, or forbids the requested options.",
+            "description": "The key is valid but lacks the scope, or forbids the requested options.",
             "content": {
               "application/json": {
                 "schema": {
@@ -182,7 +182,7 @@
             }
           },
           "422": {
-            "description": "Schema validation failed, or the batch exceeded `max_batch_items`.",
+            "description": "Schema validation failed, the batch exceeded `max_batch_items`, or (`no-verdict-within-limits`) the request's own `max_tier`, `min_tier`, `max_cost_usd` or `latency_budget_ms` ruled out every rung that could answer.",
             "content": {
               "application/json": {
                 "schema": {
@@ -212,7 +212,7 @@
             }
           },
           "503": {
-            "description": "Every enabled tier failed to produce a usable verdict.",
+            "description": "Every rung the ladder tried failed or was unavailable. Retryable; a request stopped by its own limits is a 422 instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -264,7 +264,7 @@
             }
           },
           "401": {
-            "description": "No `X-API-Key` header was supplied.",
+            "description": "No `X-API-Key` header, or one that matches no enabled key.",
             "content": {
               "application/json": {
                 "schema": {
@@ -274,7 +274,7 @@
             }
           },
           "403": {
-            "description": "The key is unknown, lacks the scope, or forbids the requested options.",
+            "description": "The key is valid but lacks the scope, or forbids the requested options.",
             "content": {
               "application/json": {
                 "schema": {
@@ -294,7 +294,7 @@
             }
           },
           "422": {
-            "description": "Schema validation failed, or the batch exceeded `max_batch_items`.",
+            "description": "Schema validation failed, the batch exceeded `max_batch_items`, or (`no-verdict-within-limits`) the request's own `max_tier`, `min_tier`, `max_cost_usd` or `latency_budget_ms` ruled out every rung that could answer.",
             "content": {
               "application/json": {
                 "schema": {
@@ -324,7 +324,7 @@
             }
           },
           "503": {
-            "description": "Every enabled tier failed to produce a usable verdict.",
+            "description": "Every rung the ladder tried failed or was unavailable. Retryable; a request stopped by its own limits is a 422 instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -376,7 +376,7 @@
             }
           },
           "401": {
-            "description": "No `X-API-Key` header was supplied.",
+            "description": "No `X-API-Key` header, or one that matches no enabled key.",
             "content": {
               "application/json": {
                 "schema": {
@@ -386,7 +386,7 @@
             }
           },
           "403": {
-            "description": "The key is unknown, lacks the scope, or forbids the requested options.",
+            "description": "The key is valid but lacks the scope, or forbids the requested options.",
             "content": {
               "application/json": {
                 "schema": {
@@ -406,7 +406,7 @@
             }
           },
           "422": {
-            "description": "Schema validation failed, or the batch exceeded `max_batch_items`.",
+            "description": "Schema validation failed, the batch exceeded `max_batch_items`, or (`no-verdict-within-limits`) the request's own `max_tier`, `min_tier`, `max_cost_usd` or `latency_budget_ms` ruled out every rung that could answer.",
             "content": {
               "application/json": {
                 "schema": {
@@ -436,7 +436,7 @@
             }
           },
           "503": {
-            "description": "Every enabled tier failed to produce a usable verdict.",
+            "description": "Every rung the ladder tried failed or was unavailable. Retryable; a request stopped by its own limits is a 422 instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1265,7 +1265,8 @@
             "anyOf": [
               {
                 "items": {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1
                 },
                 "type": "array",
                 "maxItems": 20
@@ -1309,7 +1310,8 @@
           "credit_card",
           "national_id",
           "ip_address",
-          "url_credentials"
+          "url_credentials",
+          "iban"
         ],
         "title": "PIIKind",
         "description": "Categories the redactor recognises."
@@ -1812,6 +1814,18 @@
             "title": "Degraded",
             "description": "True if the narrative refresh failed; rollup and items are still current.",
             "default": false
+          },
+          "degraded_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Degraded Reason",
+            "description": "Why the narrative was not refreshed, when `degraded` is true: `model_gateway_not_configured`, `model_unavailable`, `timeout`, `rate_limited`, `budget_exceeded`, `request_rejected`, `model_refused` or `invalid_model_output`. Null otherwise."
           },
           "usage": {
             "$ref": "#/components/schemas/RequestUsage",

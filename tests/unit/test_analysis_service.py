@@ -321,6 +321,66 @@ async def test_degraded_flag_is_carried_through(settings: Settings) -> None:
 # ── Cache ─────────────────────────────────────────────────────────────────────
 
 
+async def test_a_cache_hit_reports_no_usage_of_its_own(
+    settings: Settings, memory_cache: MemoryCache
+) -> None:
+    """SIT CL-006h: a hit spent nothing, so summing `est_cost_usd` must not double-count."""
+    paid = make_verdict(
+        tier=Tier.T3_CLOUD_LLM, usage=TierUsage(tokens_in=900, tokens_out=60, cost_usd=0.0148)
+    )
+    stub = StubOrchestrator(result=make_result(verdicts=[paid]))
+    service = build_service(stub, settings, memory_cache)
+    request = ClassifyRequest(text="the battery lasts for days")
+
+    first = await service.analyse(request, request_id="req_1", options=Options())
+    second = await service.analyse(request, request_id="req_2", options=Options())
+
+    assert first.usage.est_cost_usd == pytest.approx(0.0148)
+    assert first.usage.tiers_run == 1
+    assert second.cached is True
+    assert second.usage.est_cost_usd == 0.0
+    assert second.usage.tiers_run == 0
+    assert second.usage.tokens_in == 0
+
+
+async def test_a_settled_answer_reached_past_a_dead_rung_is_cached(
+    settings: Settings, memory_cache: MemoryCache
+) -> None:
+    """SIT CL-006i regression: a dead T2 hopped on the way to a confident T3.
+
+    The first response says `degraded` (it lived through the outage); the
+    answer is cached anyway, and the hit — which touched no dependency — does not.
+    """
+    t3 = make_verdict(tier=Tier.T3_CLOUD_LLM, usage=TierUsage(cost_usd=0.0039))
+    result = make_result(verdicts=[t3], degraded=True).model_copy(update={"settled": True})
+    stub = StubOrchestrator(result=result)
+    service = build_service(stub, settings, memory_cache)
+    request = ClassifyRequest(text="I love it, works great, fast delivery")
+
+    first = await service.analyse(request, request_id="req_1", options=Options())
+    second = await service.analyse(request, request_id="req_2", options=Options())
+
+    assert stub.calls == 1
+    assert first.degraded is True
+    assert second.cached is True
+    assert second.degraded is False
+    assert second.usage.est_cost_usd == 0.0
+
+
+async def test_an_unsettled_degraded_answer_is_not_cached(
+    settings: Settings, memory_cache: MemoryCache
+) -> None:
+    stub = StubOrchestrator(result=make_result(degraded=True))  # settled defaults to False
+    service = build_service(stub, settings, memory_cache)
+    request = ClassifyRequest(text="the battery lasts for days")
+
+    await service.analyse(request, request_id="req_1", options=Options())
+    second = await service.analyse(request, request_id="req_2", options=Options())
+
+    assert stub.calls == 2
+    assert second.cached is False
+
+
 async def test_cache_hit_skips_the_ladder(settings: Settings, memory_cache: MemoryCache) -> None:
     stub = StubOrchestrator()
     service = build_service(stub, settings, memory_cache)

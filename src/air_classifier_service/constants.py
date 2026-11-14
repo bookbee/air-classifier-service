@@ -168,7 +168,11 @@ STOP_REASONS: Final[frozenset[EscalationReason]] = frozenset(
 #: `degraded` and worth surfacing rather than folding into the same silence
 #: a confident answer gets.
 SILENT_STOP_REASONS: Final[frozenset[EscalationReason]] = STOP_REASONS - {
-    EscalationReason.NEXT_TIER_UNAVAILABLE
+    EscalationReason.NEXT_TIER_UNAVAILABLE,
+    # Only ever raised when the ladder wanted to climb and the next rung would
+    # have cost more than the caller allowed, so it explains a stop the caller
+    # chose; silence would read as a confident answer.
+    EscalationReason.COST_CEILING,
 }
 
 
@@ -269,6 +273,7 @@ class PIIKind(StrEnum):
     NATIONAL_ID = "national_id"
     IP_ADDRESS = "ip_address"
     URL_CREDENTIALS = "url_credentials"
+    IBAN = "iban"
 
 
 #: Placeholder written in place of redacted spans, e.g. ``[REDACTED:email]``.

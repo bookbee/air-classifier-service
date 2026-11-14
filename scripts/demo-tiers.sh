@@ -5,8 +5,9 @@
 # `min_tier` removes cheaper rungs entirely and `max_tier` removes dearer ones
 # (pipeline/policy.py::enabled_tiers_for), so setting them to the same value
 # runs exactly one tier — the verdict cannot have come from anywhere else.
-# A pinned tier that cannot answer returns 503 rather than falling back, which
-# is what makes this a test rather than a demo.
+# A pinned tier that cannot answer never falls back, which is what makes this a
+# test rather than a demo: 503 when its dependency is down, 422
+# `no-verdict-within-limits` when it is up but has nothing to say.
 #
 #   bash scripts/demo-tiers.sh            # every tier
 #   bash scripts/demo-tiers.sh t2         # one section
@@ -80,7 +81,8 @@ if want t0; then
   run "T0-c emoji only (0.96)"    classify '{"text":"😍😍","options":{"min_tier":"t0_rules","max_tier":"t0_rules"}}'
   run "T0-d lexicon term (0.96)"  classify '{"text":"absolutely terrible","options":{"min_tier":"t0_rules","max_tier":"t0_rules"}}'
   # Negative control: no rule matches, and a pinned T0 has nowhere to go. The
-  # 503 is the correct answer, not a failure.
+  # 422 (no-verdict-within-limits, naming options.max_tier) is the correct
+  # answer, not a failure.
   run "T0-e no rule matches"      classify '{"text":"The delivery was scheduled for Tuesday according to the tracking page.","options":{"min_tier":"t0_rules","max_tier":"t0_rules"}}'
 fi
 

@@ -29,6 +29,7 @@ from air_classifier_service.pipeline.summary_service import (
 )
 from air_classifier_service.pipeline.tiers.base import TierContext
 from air_classifier_service.providers.base import (
+    ProviderBudgetExceededError,
     ProviderResult,
     ProviderSchemaError,
     ProviderUnavailableError,
@@ -122,7 +123,15 @@ def test_merge_from_scratch_counts_the_first_batch() -> None:
 
 
 def test_merge_accumulates_onto_an_existing_rollup() -> None:
-    existing = SummaryRollup(total_items=1, sentiment_counts={Label.POSITIVE: 1})
+    seen = datetime(2026, 1, 1, tzinfo=UTC)
+    existing = SummaryRollup(
+        total_items=1,
+        counts_by_source_type={"feedback": 1},
+        sentiment_counts={Label.POSITIVE: 1},
+        urgency_counts={Urgency.LOW: 1},
+        first_seen_at=seen,
+        last_seen_at=seen,
+    )
     pairs = [(_item("a"), _response(label=Label.POSITIVE))]
 
     rollup = _merge_rollup(existing, pairs)
@@ -338,6 +347,7 @@ async def test_first_time_summary_gets_version_one() -> None:
     assert response.summary.version == 1
     assert response.summary.rollup.total_items == 1
     assert response.degraded is False
+    assert response.degraded_reason is None
 
 
 async def test_the_narrative_call_forwards_the_request_id() -> None:
@@ -385,6 +395,7 @@ async def test_two_schema_failures_degrade_and_keep_the_prior_narrative() -> Non
     response = await service.refresh(request, request_id="req_1", options=None)
 
     assert response.degraded is True
+    assert response.degraded_reason == "invalid_model_output"
     assert response.summary.narrative == "The prior narrative."
     assert response.summary.rollup.total_items == 1  # the rollup still updated
 
@@ -397,6 +408,18 @@ async def test_provider_unavailable_degrades() -> None:
     response = await service.refresh(request, request_id="req_1", options=None)
 
     assert response.degraded is True
+    assert response.degraded_reason == "model_unavailable"
+
+
+async def test_a_spent_budget_is_named_as_the_reason() -> None:
+    """SIT CL-006g: each cause has a different fix, so the response names it."""
+    provider = StubProvider(ProviderBudgetExceededError("daily budget spent"))
+    service = _service([TEXT_A], provider)
+    request = SummaryRefreshRequest(customer_id="cust_1", items=[_item(TEXT_A)])
+
+    response = await service.refresh(request, request_id="req_1", options=None)
+
+    assert response.degraded_reason == "budget_exceeded"
 
 
 async def test_unconfigured_provider_degrades_without_calling_it() -> None:
@@ -407,6 +430,7 @@ async def test_unconfigured_provider_degrades_without_calling_it() -> None:
     response = await service.refresh(request, request_id="req_1", options=None)
 
     assert response.degraded is True
+    assert response.degraded_reason == "model_gateway_not_configured"
     assert provider.calls == []
 
 

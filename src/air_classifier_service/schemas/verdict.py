@@ -58,6 +58,12 @@ class TierVerdict(BaseModel):
     usage: TierUsage = Field(default_factory=TierUsage)
     #: Free-form, never used for control flow — diagnostics only.
     detail: dict[str, str] = Field(default_factory=dict)
+    #: The rung answered, but from a fallback it only uses because a dependency
+    #: is missing (Tier 1 on its lexicon when the ONNX artifact is absent). If
+    #: this verdict is the one returned, the response is `degraded` — the same
+    #: "a dependency being down is why the answer is worse" the ladder already
+    #: reports for failed and unavailable rungs (SIT CL-005).
+    fallback: bool = False
 
     @classmethod
     def failed(
@@ -171,6 +177,13 @@ class OrchestrationResult(BaseModel):
     verdicts: list[TierVerdict]
     steps: list[EscalationStep]
     degraded: bool = False
+    #: The deciding verdict met its own rung's floor: the ladder stopped because
+    #: it was confident, not because it was capped or had nowhere to climb, and
+    #: the answer is not a fallback backend's. A result can be `degraded` *and*
+    #: settled — a dead T2 hopped on the way to a confident T3 — and such an
+    #: answer is as good as one reached with every rung up, so it is safe to
+    #: cache (SIT CL-006i regression: while T2 was down, nothing was cached).
+    settled: bool = False
     cached: bool = False
 
     @property
@@ -260,7 +273,11 @@ class LLMSentimentOutput(BaseModel):
             aspects=list(self.aspects),
             emotions=list(self.emotions),
             tone=self.tone,
-            topics=list(self.topics),
+            # A topic the model scored at zero is one it did not find: kept, it
+            # reads as a finding and is counted in a summary's `topic_counts`
+            # (SIT CL-006e). Dropped here rather than rejected by the schema,
+            # where one noise entry would fail the whole structured answer.
+            topics=[topic for topic in self.topics if topic.confidence > 0.0],
             intent=self.intent,
             # An LLM gives no runner-up distribution, so margin is derived from
             # confidence: a 0.9-confident answer implies a wide gap to second place.
