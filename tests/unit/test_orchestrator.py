@@ -597,6 +597,122 @@ async def test_a_failed_rung_is_counted_as_failed_not_as_an_escalation() -> None
     assert failures() == before + 1
 
 
+# ── A rung that keeps timing out (SIT CL-007) ─────────────────────────────────
+
+
+async def test_a_rung_that_keeps_timing_out_is_stepped_over() -> None:
+    """Two timeouts in a row, then the ladder stops paying for the third."""
+    settings = tuned_settings(timeout_ms=20)
+    t0 = FakeTier(tier=Tier.T0_RULES, verdict=unsure(Tier.T0_RULES))
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=verdict(Tier.T1_CLASSIFIER), delay_s=5.0)
+    t2 = FakeTier(tier=Tier.T2_LOCAL_LLM, verdict=verdict(Tier.T2_LOCAL_LLM))
+    ladder = build(t0, t1, t2, settings=settings)
+
+    for _ in range(2):
+        result = await ladder.run(make_ctx())
+        assert result.best.tier is Tier.T2_LOCAL_LLM
+    assert t1.calls == 2
+
+    result = await ladder.run(make_ctx())
+
+    assert t1.calls == 2
+    assert result.best.tier is Tier.T2_LOCAL_LLM
+    assert [v.tier for v in result.verdicts] == [Tier.T0_RULES, Tier.T2_LOCAL_LLM]
+    # A rung the ladder wanted and could not use: the same outage as a dead one.
+    assert result.degraded is True
+
+
+async def test_a_tripped_rung_is_probed_again_after_the_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(orchestrator_module, "_SLOW_COOLDOWN_S", 0.0)
+    settings = tuned_settings(timeout_ms=20)
+    t0 = FakeTier(tier=Tier.T0_RULES, verdict=verdict(Tier.T0_RULES), delay_s=5.0)
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=verdict(Tier.T1_CLASSIFIER))
+    ladder = build(t0, t1, settings=settings)
+    for _ in range(2):
+        await ladder.run(make_ctx())
+
+    t0.delay_s = 0.0
+    result = await ladder.run(make_ctx())
+
+    assert t0.calls == 3
+    assert result.best.tier is Tier.T0_RULES
+    assert result.degraded is False
+
+
+async def test_a_slow_rung_is_skipped_when_the_budget_cannot_cover_it_and_the_next() -> None:
+    """One timeout is not a trip, but a tight budget already has no room for it."""
+    settings = tuned_settings(timeout_ms=40)
+    t0 = FakeTier(tier=Tier.T0_RULES, verdict=verdict(Tier.T0_RULES), delay_s=5.0)
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=verdict(Tier.T1_CLASSIFIER))
+    ladder = build(t0, t1, settings=settings)
+    await ladder.run(make_ctx())
+
+    result = await ladder.run(make_ctx(budget_ms=30.0))
+
+    assert t0.calls == 1
+    assert result.best.tier is Tier.T1_CLASSIFIER
+    # The caller's budget chose the shorter ladder; nothing failed this time.
+    assert result.degraded is False
+
+
+async def test_a_fast_rung_is_never_skipped_because_the_next_one_is_slow() -> None:
+    """A 1 ms rung must run even when the rung above it has been timing out and
+    the two together would not fit the budget."""
+    settings = tuned_settings(timeout_ms=40)
+    t0 = FakeTier(tier=Tier.T0_RULES, verdict=unsure(Tier.T0_RULES))
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=verdict(Tier.T1_CLASSIFIER), delay_s=5.0)
+    ladder = build(t0, t1, settings=settings)
+    await ladder.run(make_ctx())
+
+    result = await ladder.run(make_ctx(budget_ms=30.0))
+
+    assert t0.calls == 2
+    assert result.best.tier is Tier.T0_RULES
+
+
+async def test_the_top_rung_is_never_stepped_over() -> None:
+    settings = tuned_settings(timeout_ms=20)
+    t0 = FakeTier(tier=Tier.T0_RULES, verdict=verdict(Tier.T0_RULES), delay_s=5.0)
+    ladder = build(t0, settings=settings)
+
+    for _ in range(3):
+        with pytest.raises(NoVerdictError):
+            await ladder.run(make_ctx())
+
+    assert t0.calls == 3
+
+
+async def test_a_slow_rung_is_not_skipped_for_a_rung_that_cannot_serve() -> None:
+    settings = tuned_settings(timeout_ms=20)
+    t0 = FakeTier(tier=Tier.T0_RULES, verdict=verdict(Tier.T0_RULES), delay_s=5.0)
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=verdict(Tier.T1_CLASSIFIER), available=False)
+    ladder = build(t0, t1, settings=settings)
+
+    for _ in range(3):
+        with pytest.raises(NoVerdictError):
+            await ladder.run(make_ctx())
+
+    assert t0.calls == 3
+
+
+async def test_a_timeout_cut_short_by_the_budget_does_not_count_against_the_rung() -> None:
+    """Cut off after 5% of its timeout, a rung has shown nothing about its speed."""
+    t0 = FakeTier(tier=Tier.T0_RULES, verdict=verdict(Tier.T0_RULES), delay_s=5.0)
+    t1 = FakeTier(tier=Tier.T1_CLASSIFIER, verdict=verdict(Tier.T1_CLASSIFIER))
+    ladder = build(t0, t1)
+    for _ in range(3):
+        with pytest.raises(NoVerdictError):
+            await ladder.run(make_ctx(budget_ms=50.0))
+
+    t0.delay_s = 0.0
+    result = await ladder.run(make_ctx())
+
+    assert t0.calls == 4
+    assert result.best.tier is Tier.T0_RULES
+
+
 # ── Tier-agnosticism ──────────────────────────────────────────────────────────
 
 

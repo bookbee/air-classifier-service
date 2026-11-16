@@ -24,6 +24,7 @@ asking for a second, stronger opinion when it was not.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Final
 
@@ -58,6 +59,11 @@ logger = get_logger(__name__)
 #: non-positive deadline, so a nearly-spent budget would abort before the request
 #: was even sent — an expensive way to learn nothing.
 _MIN_TIMEOUT_S: Final[float] = 0.05
+#: Left unspent at the end of the rung's window so the arbiter's own timeout
+#: fires before the ladder's does.
+_ARBITER_MARGIN_S: Final[float] = 0.25
+#: Below this a second opinion cannot realistically arrive; keep the first.
+_ARBITER_MIN_S: Final[float] = 1.0
 
 
 class CloudLLMTier:
@@ -117,6 +123,10 @@ class CloudLLMTier:
             raise TierUnavailableError("latency budget exhausted before the cloud call")
 
         started = time.perf_counter()
+        # What the ladder allows this whole rung, both calls together: it cancels
+        # `analyse` after this long, so the second opinion has to fit in what the
+        # first call left of it.
+        window_s = self._timeout_s(ctx)
         async with span(
             "tier.t3_cloud_llm",
             model=self._config.cloud_model,
@@ -129,7 +139,12 @@ class CloudLLMTier:
                 user_text=user_content(ctx),
             )
             output = _output_of(primary)
-            final, usage = await self._arbitrate(ctx, primary=primary, output=output)
+            final, usage = await self._arbitrate(
+                ctx,
+                primary=primary,
+                output=output,
+                allowance_s=window_s - (time.perf_counter() - started) - _ARBITER_MARGIN_S,
+            )
 
         if final is not primary:
             output = _output_of(final)
@@ -150,14 +165,25 @@ class CloudLLMTier:
         *,
         primary: ProviderResult,
         output: LLMSentimentOutput,
+        allowance_s: float,
     ) -> tuple[ProviderResult, TierUsage]:
         """Take a second opinion from the arbiter model, once, if it is warranted.
 
         Returns whichever result stands plus the usage of *every* call made, so
         the cost ceiling sees the true spend rather than the winning half of it.
+
+        ``allowance_s`` is what is left of this rung's own window. The arbiter is
+        the slower model, and the ladder cancels the whole rung when the window
+        closes: an arbiter still thinking at that point used to take the primary
+        answer down with it, leaving the caller the lexicon's verdict after the
+        longest possible wait (SIT CL-009). So the second opinion is bounded by
+        the allowance, and not asked for at all when too little is left.
         """
         usage = primary.to_usage()
         if not self._should_arbitrate(ctx, primary=primary, output=output):
+            return primary, usage
+        if allowance_s < _ARBITER_MIN_S:
+            logger.info("t3.arbitration_skipped", reason="rung_window", allowance_s=allowance_s)
             return primary, usage
 
         # The arbiter is shown what the fast model concluded, threaded through
@@ -173,13 +199,16 @@ class CloudLLMTier:
         )
 
         try:
-            arbiter = await self._call(
-                hinted,
-                model=self._config.arbiter_model,
-                max_tokens=self._config.arbiter_max_tokens,
-                user_text=user_content(hinted),
+            arbiter = await asyncio.wait_for(
+                self._call(
+                    hinted,
+                    model=self._config.arbiter_model,
+                    max_tokens=self._config.arbiter_max_tokens,
+                    user_text=user_content(hinted),
+                ),
+                timeout=allowance_s,
             )
-        except TierError as exc:
+        except (TierError, TimeoutError) as exc:
             # A failed second opinion is not a failed request: the primary answer
             # is unconfident, not unusable, and returning it beats degrading to a
             # rung that knows less.

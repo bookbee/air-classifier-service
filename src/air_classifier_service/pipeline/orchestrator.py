@@ -27,6 +27,22 @@ capability gap, not a defect in this rung, and it gets the same
 console-visible and, via the response's own ``escalation_trace``, visible to
 the caller too, so either side can tell "confident" and "stuck below where the
 ladder wanted to be" apart.
+
+**A rung that keeps timing out is stepped over, not waited on** (SIT CL-007).
+The ladder's cost/latency case assumes the cheap rungs are fast. Where one
+measurably is not (a local model on a CPU-only host), paying its full timeout on
+every request leaves no budget for the rung above, and the caller gets the
+lexicon's answer after the longest possible wait. :class:`_Pace` keeps a little
+latency history per rung, and a rung is skipped, only ever in favour of a
+servable rung above it, in two cases: it has timed out
+:data:`_SLOW_TRIP_AFTER` times in a row (skipped for
+:data:`_SLOW_COOLDOWN_S`, then probed again by one request, and reported as
+``degraded`` like any other rung the ladder could not use), or its last run
+timed out and its usual latency plus the next rung's does not fit in what is
+left of this request's budget (the caller's own budget choosing a shorter
+ladder, so not ``degraded``). A rung that answered last time is never doubted.
+The history is per process: each worker learns it separately, at the cost of
+:data:`_SLOW_TRIP_AFTER` slow requests each.
 """
 
 from __future__ import annotations
@@ -34,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from air_classifier_service.config import Settings
 from air_classifier_service.constants import EscalationReason
@@ -58,6 +75,43 @@ from air_classifier_service.schemas.verdict import (
 __all__ = ["NoVerdictError", "Orchestrator"]
 
 _log = get_logger(__name__)
+
+
+#: Consecutive timeouts after which a rung is stepped over for a cooldown.
+_SLOW_TRIP_AFTER = 2
+#: How long a tripped rung is stepped over before one request probes it again.
+_SLOW_COOLDOWN_S = 300.0
+#: Weight of the newest sample in a rung's latency average.
+_PACE_ALPHA = 0.3
+#: A timeout only counts against a rung when it was given at least this share
+#: of its configured timeout: a rung cut off after 50 ms by a nearly spent
+#: budget has shown nothing about its own speed.
+_FAIR_TIMEOUT_SHARE = 0.5
+
+
+@dataclass
+class _Pace:
+    """What the ladder has seen of one rung's latency (SIT CL-007)."""
+
+    ewma_ms: float | None = None
+    consecutive_timeouts: int = 0
+    skip_until: float = 0.0
+
+    def observe(self, latency_ms: float, *, timed_out: bool, fair: bool, now: float) -> None:
+        if timed_out and not fair:
+            return
+        self.ewma_ms = (
+            latency_ms
+            if self.ewma_ms is None
+            else (1.0 - _PACE_ALPHA) * self.ewma_ms + _PACE_ALPHA * latency_ms
+        )
+        if not timed_out:
+            self.consecutive_timeouts = 0
+            self.skip_until = 0.0
+            return
+        self.consecutive_timeouts += 1
+        if self.consecutive_timeouts >= _SLOW_TRIP_AFTER:
+            self.skip_until = now + _SLOW_COOLDOWN_S
 
 
 class NoVerdictError(Exception):
@@ -108,6 +162,7 @@ class Orchestrator:
         self._tiers: dict[TierId, Tier] = {tier.tier: tier for tier in tiers}
         self._policy = policy
         self._settings = settings
+        self._pace: dict[TierId, _Pace] = {tier.tier: _Pace() for tier in tiers}
 
     async def run(self, ctx: TierContext) -> OrchestrationResult:
         """Climb until the policy says stop, then return the best answer."""
@@ -125,6 +180,19 @@ class Orchestrator:
         position = 0
         while position < len(ladder):
             tier = ladder[position]
+            slow = self._slow_reason(ladder, position, ctx)
+            if slow is not None:
+                above = await self._next_available_position(ladder, position + 1)
+                if above is not None:
+                    # Tripped: the rung is failing, the same outage as a rung
+                    # the probe knew was down. Budget: the caller's own budget
+                    # chose a shorter ladder, which is not a degradation.
+                    degraded = degraded or slow == "slow_tripped"
+                    _log.warning(
+                        "tier.skipped", request_id=ctx.request_id, tier=tier.tier.value, reason=slow
+                    )
+                    position = above
+                    continue
             timeout_s = self._timeout_s(tier, ctx)
             if timeout_s <= 0.0:
                 # Starting a rung that cannot finish buys nothing but latency.
@@ -280,13 +348,53 @@ class Orchestrator:
         configured_ms = float(self._settings.tiers.for_tier(tier.tier).timeout_ms)
         return min(configured_ms, ctx.remaining_ms) / 1000.0
 
+    def _slow_reason(self, ladder: Sequence[Tier], position: int, ctx: TierContext) -> str | None:
+        """Why this rung should be stepped over for the one above, if it should.
+
+        ``slow_tripped``: it has timed out repeatedly and is inside its cooldown.
+        ``slow_for_budget``: it timed out last time, and its usual latency plus
+        the next rung's would not fit in the remaining budget, so starting it
+        could only starve that rung.
+        The caller still checks that a rung above can serve; the top rung is
+        never skipped.
+        """
+        if position + 1 >= len(ladder):
+            return None
+        pace = self._pace[ladder[position].tier]
+        if pace.consecutive_timeouts >= _SLOW_TRIP_AFTER and time.monotonic() < pace.skip_until:
+            return "slow_tripped"
+        # Only a rung whose last fair run timed out is doubted. One that answers
+        # is run however slow the rung after it is: a 1 ms lexicon must not be
+        # stepped over because the model above it takes four seconds.
+        if pace.consecutive_timeouts == 0 or pace.ewma_ms is None:
+            return None
+        next_ms = self._pace[ladder[position + 1].tier].ewma_ms or 0.0
+        if pace.ewma_ms + next_ms > ctx.remaining_ms:
+            return "slow_for_budget"
+        return None
+
     async def _analyse(self, tier: Tier, ctx: TierContext, timeout_s: float) -> TierVerdict:
         """Run one rung, converting every failure mode into a failed verdict."""
         started = time.perf_counter()
+        pace = self._pace[tier.tier]
         try:
-            return await asyncio.wait_for(tier.analyse(ctx), timeout=timeout_s)
+            verdict = await asyncio.wait_for(tier.analyse(ctx), timeout=timeout_s)
+            pace.observe(
+                (time.perf_counter() - started) * 1000.0,
+                timed_out=False,
+                fair=True,
+                now=time.monotonic(),
+            )
+            return verdict
         except TimeoutError:
             error = f"timed out after {timeout_s * 1000:.0f}ms"
+            configured_s = float(self._settings.tiers.for_tier(tier.tier).timeout_ms) / 1000.0
+            pace.observe(
+                timeout_s * 1000.0,
+                timed_out=True,
+                fair=timeout_s >= configured_s * _FAIR_TIMEOUT_SHARE,
+                now=time.monotonic(),
+            )
             _log.warning(
                 "tier.timeout",
                 request_id=ctx.request_id,

@@ -14,6 +14,7 @@ for a second opinion, never *who* answers the first one.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -28,6 +29,7 @@ from air_classifier_service.config import (
 )
 from air_classifier_service.constants import Label, ModelClass, Provider
 from air_classifier_service.pipeline.features import extract_features
+from air_classifier_service.pipeline.tiers import t3_cloud_llm as t3_module
 from air_classifier_service.pipeline.tiers.base import TierContext, TierError, TierUnavailableError
 from air_classifier_service.pipeline.tiers.t3_cloud_llm import CloudLLMTier
 from air_classifier_service.providers.base import (
@@ -318,6 +320,42 @@ async def test_arbitration_happens_at_most_once() -> None:
 
     assert provider.models_called == [PRIMARY, ARBITER]
     assert verdict.result.confidence == pytest.approx(0.21)
+
+
+async def test_a_slow_arbiter_does_not_take_the_primary_answer_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SIT CL-009. The arbiter outlives the rung's window; the primary answer,
+    already in hand, is the verdict rather than a timed-out rung."""
+    monkeypatch.setattr(t3_module, "_ARBITER_MARGIN_S", 0.05)
+    monkeypatch.setattr(t3_module, "_ARBITER_MIN_S", 0.05)
+    tier, provider = _tier([_result(confidence=0.20, model=HAIKU)])
+    primary_call = provider.classify
+
+    async def classify(**kwargs: Any) -> ProviderResult:
+        if kwargs["model"] == ARBITER:
+            provider.calls.append(kwargs)
+            await asyncio.sleep(5.0)
+        return await primary_call(**kwargs)
+
+    monkeypatch.setattr(provider, "classify", classify)
+    started = time.perf_counter()
+
+    verdict = await asyncio.wait_for(tier.analyse(_ctx(remaining_s=0.4)), timeout=0.4)
+
+    assert time.perf_counter() - started < 0.4
+    assert provider.models_called == [PRIMARY, ARBITER]
+    assert verdict.result.confidence == pytest.approx(0.20)
+    assert verdict.model_version == f"anthropic:{HAIKU}"
+
+
+async def test_arbitration_is_not_started_when_the_rung_window_is_nearly_spent() -> None:
+    tier, provider = _tier([_result(confidence=0.20, model=HAIKU)])
+
+    verdict = await tier.analyse(_ctx(remaining_s=0.5))
+
+    assert provider.models_called == [PRIMARY]
+    assert verdict.result.confidence == pytest.approx(0.20)
 
 
 async def test_arbitration_can_be_switched_off() -> None:
