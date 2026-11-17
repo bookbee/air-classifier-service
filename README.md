@@ -5,6 +5,12 @@ context (rating, channel, subject, …) and returns a structured, explainable ve
 sentiment, tone, topics, intent, urgency, routing, a requires-human flag, aspect-level scoring
 and rating consistency — whichever of those the text and the ladder's reach actually support.
 
+> **Part of the AIR platform.** New here? Start with the
+> [platform overview](../air-web-console/docs/platform/01-overview.md), the
+> [concepts page](../air-web-console/docs/platform/02-concepts.md) and the
+> [local setup guide](../air-web-console/docs/platform/03-local-setup.md) in
+> air-web-console, which bring up all the services together.
+
 | If you are… | Start with |
 | --- | --- |
 | New to the service | [How it works](#how-it-works), then [Quickstart](#quickstart) |
@@ -134,7 +140,7 @@ AIR_CLASSIFIER__MODEL_GATEWAY__TOKEN=air-classifier-dev     # provisioned by the
 | --- | --- | --- |
 | `make run` | Native, foreground, autoreload | `.venv` |
 | `make start` / `stop` / `restart` / `status` | Native, background, logs to `.run/service.log` | `.venv` |
-| `make up` | Container on air-infra's `air-net` network, Redis cache | air-infra up (creates `air-net` and Redis); fails loudly otherwise, on purpose |
+| `make up` | Container on the shared `air-net` network, Redis cache | [air-infrastructure-service](../air-infrastructure-service) up (it creates `air-net` and Redis; called `air-infra` in this repository's comments); fails loudly otherwise, on purpose |
 | `make up INFRA=none` | Container on its own network, in-process cache (`docker-compose.standalone.yml`) | Docker only |
 | `make down` / `make logs` | Stop / tail the container (either mode) | — |
 
@@ -293,14 +299,33 @@ the development salt.
 ## Deployment and operations
 
 Production does not use the compose files. Every dependency is reached through an environment
-variable pointing at a managed instance. This repo contains **no Kubernetes manifests and no CI
-workflow** (see [Known issues](#known-issues-and-open-items)).
+variable pointing at a managed instance.
+
+```bash
+export IMAGE_REPOSITORY=<region>-docker.pkg.dev/<project>/air/air-classifier-service
+make image-push                                   # linux/amd64, tagged with this commit
+make deploy DEPLOY_ENV=uat KUBE_CONTEXT=<context> GCP_PROJECT=<project>
+make deploy-smoke DEPLOY_ENV=uat KUBE_CONTEXT=<context>
+```
+
+This repository owns its `Dockerfile` and image. The Helm chart, the values for UAT
+and production, the Terraform and the deploy scripts are in
+[air-infrastructure-service](../air-infrastructure-service/gke/README.md) (`gke/`),
+where DevOps keeps them for every core service; the targets above call into that
+checkout (`INFRA_DIR`). Its [runbook](../air-infrastructure-service/docs/03-gke-runbook.md)
+is the procedure, and `make deploy-render SAMPLE=1` prints what would be applied.
+**If this service's start command, port or user changes, update its values files
+there** (`gke/values/*/air-classifier-service.yaml`).
+
+To bake the Tier-1 model into the pushed image, add `MODEL_URL=… MODEL_SHA256=… TOKENIZER_URL=…
+TOKENIZER_SHA256=…` to `make image-push`. This repository has **no CI workflow and no deploy
+pipeline** yet (see [Known issues](#known-issues-and-open-items)).
 
 ### Image
 
 | | |
 | --- | --- |
-| Build | `make image` (`docker build -t air-classifier-service:dev .`); multi-stage, `python:3.12-slim` |
+| Build | `make image` (`docker build -t air-classifier-service:dev .`) locally; `make image-push` for a registry. Multi-stage, `python:3.12-slim` |
 | Runs as | Non-root user `air` (uid 1001) |
 | Listens on | Container port **8080** (`uvicorn … --proxy-headers`). The host port 8082 is only this repo's local convention |
 | Workers | One uvicorn process per container. Scale with replicas; `APP__WORKERS` only applies to `python -m air_classifier_service` |
@@ -354,7 +379,7 @@ workflow** (see [Known issues](#known-issues-and-open-items)).
 | T3 failing with `ProviderBudgetExceededError` | This service's daily budget at the gateway is spent | Clears at 00:00 UTC; raise `daily_budget_usd` in the gateway's policy, or reduce T3 traffic |
 | Tier 2 times out intermittently on the first call after idle | Local model cold-loading (Ollama unloads idle models after 5 min) | Expected; `scripts/demo-tiers.sh` warms it first. Raise `TIERS__T2_LOCAL_LLM__TIMEOUT_MS` if it happens in production |
 | `/v1/capabilities` shows `scorer_kind: lexicon` | No Tier-1 ONNX artifact | Mount or bake it in ([Image](#image)) |
-| `make up`: "network air-net … not found" | air-infra isn't running | Start air-infra, or `make up INFRA=none` |
+| `make up`: "network air-net … not found" | air-infrastructure-service isn't running | `cd ../air-infrastructure-service && make env && make up`, or `make up INFRA=none` here |
 | Service won't start: validation error on a `*_MODEL` setting | A value other than `local` / `auto` / `cloud` | Use a class name; vendor and model names belong in the gateway's routing config |
 
 ## Development
@@ -387,7 +412,7 @@ make help               # every target
 
 | Command | Runs | External services |
 | --- | --- | --- |
-| `make test` | Everything | None |
+| `make test` | Everything, **including the `live` cases** (see [Known issues](#known-issues-and-open-items)) | None for the rest; the `live` cases call a gateway on `:8083` |
 | `make test-unit` | `tests/unit/` | None |
 | `make test-integration` | `tests/integration/`: real components wired together, the gateway mocked at the HTTP layer | None |
 | `make test-eval` | Golden set, Tier 0/1 cases | None |
@@ -449,20 +474,26 @@ None is a hard dependency: a bare checkout with nothing configured boots and ser
 | --- | --- | --- | --- |
 | [air-model-gateway](../air-model-gateway/README.md) | Gateway team | Tiers 2 and 3, summary narrative | Ladder stops at `t1_classifier`; `degraded: true` where it wanted to climb |
 | Tier-1 ONNX artifact | This repo | Tier 1's real model | Lexicon fallback, less accurate |
-| Redis | air-infra (locally) or managed (production) | Shared verdict cache, idempotency, quotas | In-process cache; correct, but per-replica |
+| Redis | air-infrastructure-service (locally) or managed (production) | Shared verdict cache, idempotency, quotas | In-process cache; correct, but per-replica |
 | MongoDB | Optional | Audit log (`AUDIT__BACKEND=mongo`) | No audit log (the default) |
-| Prometheus / Grafana | air-infra (locally) | Scraping `/metrics` | No dashboards |
+| Prometheus / Grafana | air-infrastructure-service (locally) | Scraping `/metrics` | No dashboards |
 
 ## Known issues and open items
 
+Bugs found in this service by platform testing are tracked in
+[`air-web-console/bugs/classifier/`](../air-web-console/bugs/classifier/README.md). The first
+three rows below are one report there, CL-010: together they make `make check` red on a clean
+checkout.
+
 | Item | Detail |
 | --- | --- |
+| `make check` fails its format step | 4 files predate the current ruff formatter (`ruff format --check` names them); `make fmt` fixes them as one commit. Because the format check runs first, `make check` never reaches the tests |
 | 5 golden-set Tier 1 cases fail | `t1-pos-2`, `t1-neg-3`, `t1-multilingual`, `t1-short-neg`, `t1-pos-4` fail with the lexicon fallback (no ONNX artifact). They fail on `develop` too; re-check with the real artifact before treating them as bugs |
-| `make check` fails its format step | 5 files predate the current ruff formatter (`orchestrator.py`, `pipeline/service.py`, `tiers/scorers.py`, `tests/eval/test_golden_set.py`, `tests/unit/test_prompts.py`); `make fmt` fixes them as one commit |
+| `make test` runs the `live` cases | The `live` marker is documented as opt-in, but bare `pytest` (and so `make test` and `make check`) selects it: 3 more failures with no gateway running, and real paid calls with one. Until fixed, use `.venv/bin/pytest -m "not live"`: 1,105 pass, 5 fail (the row above) |
 | Gateway routing override can drift unnoticed | If the gateway's `overrides.air-classifier-service` were removed, `local` would gain fallback rungs and `cloud` would become the cheap chain. Nothing here detects that yet; a check against the gateway's `GET /v1/capabilities` would |
 | Dev salt not rejected in production | The production guard covers `ALLOW_UNAUTHENTICATED` and `LOG_RAW_TEXT` only; see the [checklist](#production-checklist) |
-| No CI workflow or Kubernetes manifests in this repo | `make check` is the intended CI gate; deployment manifests live wherever DevOps keeps them |
-| air-infra repository name | Local docs and the Makefile refer to `../air-infra`; air-model-gateway calls it `air-infrastructure-service`. Confirm the name and update `INFRA_DIR` and the docs if it changed |
+| No CI workflow or deploy pipeline in this repo | `make check` is the intended CI gate. The Helm chart and values are in air-infrastructure-service (`gke/`); air-model-gateway's `deploy.yml` is the template for a pipeline |
+| "air-infra" in comments and design documents | The repository is `air-infrastructure-service`. The Makefile's `INFRA_DIR` and `scripts/doctor.sh` were corrected on 2026-11-16 (CL-011); comments and the design documents still use the short name `air-infra`, which is harmless |
 | `X-Remaining-Budget-Ms` is ignored | Sent on every gateway call, but the gateway doesn't read it yet |
 | Gateway migration note | air-model-gateway's `docs/06-consumer-migration.md` still lists this service as not migrated; update it from that repo |
 

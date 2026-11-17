@@ -18,7 +18,7 @@ SERVE_LOG ?= .run/service.log
 # Model access (Tier 2 and Tier 3 both) is air-model-gateway's, reached over the
 # host — see docker-compose.yml — never through this network.
 NETWORK ?= air-net
-INFRA_DIR ?= ../air-infra
+INFRA_DIR ?= ../air-infrastructure-service
 
 # Container runs only: `shared` (default) joins air-infra's air-net and its
 # Redis, and refuses to start without them; `none` runs this service on its own
@@ -128,7 +128,7 @@ openapi: ## Write the OpenAPI 3.1 spec to docs/openapi.json
 		pathlib.Path('docs/openapi.json').write_text(json.dumps(create_app().openapi(), indent=2) + '\n')"
 	@echo "wrote docs/openapi.json"
 
-image: ## Build the runtime image
+image: ## Build the runtime image locally as $(IMAGE):$(TAG) (registry: make image-push)
 	docker build -t $(IMAGE):$(TAG) .
 
 infra-check: ## Fail early if air-infra's shared stack is not up
@@ -168,6 +168,62 @@ doctor: ## Check this service's dependencies are reachable
 	@NETWORK=$(NETWORK) INFRA_DIR=$(INFRA_DIR) MODEL_GATEWAY_DIR=$(MODEL_GATEWAY_DIR) \
 		INFRA=$(INFRA) STANDALONE_NETWORK=$(STANDALONE_NETWORK) \
 		HOST=$(HOST) PORT=$(PORT) bash scripts/doctor.sh
+
+# ---- image and deployment (UAT and production) ------------------------------
+# This repository owns its Dockerfile and image. The Helm chart, the Terraform
+# and the deployment scripts for every core service live in
+# air-infrastructure-service (gke/), where DevOps keeps them. The targets below
+# build and push the image here, then hand over to that repository, checked out
+# next to this one (INFRA_DIR). Its docs/03-gke-runbook.md is the runbook.
+#
+#   DEPLOY_ENV        uat | prod
+#   IMAGE_REPOSITORY  <region>-docker.pkg.dev/<project>/air/air-classifier-service
+#   IMAGE_TAG         defaults to this checkout's short commit
+#   IMAGE_DIGEST      what CI should deploy: a digest can't be re-pointed
+#   KUBE_CONTEXT      required by deploy / deploy-smoke; never defaulted, so a
+#                     deploy can't land on whatever cluster happens to be current
+#   GCP_PROJECT       the environment's project (Secret Manager)
+#   MODEL_URL, MODEL_SHA256, TOKENIZER_URL, TOKENIZER_SHA256
+#                     image-push only, optional: bake the Tier 1 model into the
+#                     image (see the Dockerfile). Without them Tier 1 runs on
+#                     its weaker fallback unless the files are mounted
+#   KEYS_FILE         deploy-smoke only, optional: an env file of raw API keys,
+#                     to add one authenticated call to the readiness checks
+DEPLOY_ENV ?= uat
+SERVICE    := air-classifier-service
+MODEL_BUILD_ARGS = $(foreach v,MODEL_URL MODEL_SHA256 TOKENIZER_URL TOKENIZER_SHA256,$(if $($(v)),--build-arg $(v)=$($(v))))
+IMAGE_TAG  ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo dev)
+INFRA_MAKE  = $(MAKE) --no-print-directory -C $(INFRA_DIR) SERVICE=$(SERVICE) DEPLOY_ENV=$(DEPLOY_ENV) \
+	KUBE_CONTEXT="$(KUBE_CONTEXT)" GCP_PROJECT="$(GCP_PROJECT)" KEYS_FILE="$(KEYS_FILE)" \
+	IMAGE_REPOSITORY="$(IMAGE_REPOSITORY)" IMAGE_DIGEST="$(IMAGE_DIGEST)" \
+	IMAGE_TAG="$(if $(IMAGE_DIGEST),,$(IMAGE_TAG))"
+
+.PHONY: require-infra-repo
+require-infra-repo:
+	@test -f $(INFRA_DIR)/gke/scripts/release.sh || { \
+		echo "air-infrastructure-service is not at $(INFRA_DIR): the charts and deploy scripts live there."; \
+		echo "Check it out next to this repository, or pass INFRA_DIR=<path>."; exit 1; }
+
+.PHONY: require-image-repository
+require-image-repository:
+	@test -n "$(IMAGE_REPOSITORY)" || { echo "set IMAGE_REPOSITORY, e.g. <region>-docker.pkg.dev/<project>/air/$(SERVICE)"; exit 1; }
+
+.PHONY: image-push
+image-push: require-image-repository ## Build for linux/amd64 and push IMAGE_REPOSITORY:IMAGE_TAG (gcloud auth configure-docker first)
+	docker build --platform linux/amd64 $(MODEL_BUILD_ARGS) -t $(IMAGE_REPOSITORY):$(IMAGE_TAG) .
+	docker push $(IMAGE_REPOSITORY):$(IMAGE_TAG)
+
+.PHONY: deploy-render
+deploy-render: require-infra-repo ## Print the manifests DEPLOY_ENV would get (SAMPLE=1 fills the project placeholders)
+	@$(INFRA_MAKE) SAMPLE="$(SAMPLE)" gke-render
+
+.PHONY: deploy
+deploy: require-infra-repo ## Deploy this service to DEPLOY_ENV (uat|prod) in KUBE_CONTEXT: helm upgrade --install
+	@$(INFRA_MAKE) gke-deploy
+
+.PHONY: deploy-smoke
+deploy-smoke: require-infra-repo ## Smoke-test this service in KUBE_CONTEXT: rollout, health, readiness (KEYS_FILE adds a real call)
+	@$(INFRA_MAKE) gke-smoke
 
 clean: ## Remove build and tool caches (leaves .venv alone)
 	rm -rf build dist .coverage coverage.xml htmlcov

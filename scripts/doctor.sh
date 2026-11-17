@@ -12,7 +12,7 @@
 set -uo pipefail
 
 NETWORK="${NETWORK:-air-net}"
-INFRA_DIR="${INFRA_DIR:-../air-infra}"
+INFRA_DIR="${INFRA_DIR:-../air-infrastructure-service}"
 # `shared` expects air-infra's network and Redis; `none` is the standalone
 # container run (`make up INFRA=none`), where their absence is expected.
 INFRA="${INFRA:-shared}"
@@ -53,7 +53,9 @@ fi
 # a developer verifies it regardless of where this service is running.
 if [ "$standalone" -eq 1 ]; then
   : # nothing to check: the standalone run's cache lives in the container
-elif docker exec air-infra-redis-1 redis-cli -a localdevpass ping 2>/dev/null | grep -q PONG; then
+# The container is named after air-infrastructure-service's compose project. Probing
+# the published port instead would need redis-cli on the host.
+elif docker exec "${REDIS_CONTAINER:-air-infrastructure-service-redis-1}" redis-cli -a localdevpass ping 2>/dev/null | grep -q PONG; then
   ok "redis answers an authenticated PING"
 else
   bad "air-infra's redis is not answering — 'cd $INFRA_DIR && make ps'"

@@ -8,7 +8,7 @@
 # which is its own standalone service on its own network, reached over the host
 # (`host.docker.internal`) exactly like a host-native Ollama used to be.
 #
-#   cd ../air-infra && make up            # once, before this — redis
+#   cd ../air-infrastructure-service && make up   # once, before this — redis
 #   cd ../air-model-gateway && make up    # once, before this — models
 #   make up                               # here
 #

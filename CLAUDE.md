@@ -33,7 +33,7 @@ Every model call (local and cloud) goes through **air-model-gateway** (`../air-m
 `POST /v1/generate`), the platform's single model gateway — this service holds no provider SDKs
 or API keys of its own. The gateway owns credentials, cross-vendor routing/failover, cost
 accounting, per-service daily budgets and caching. Redis and Prometheus are
-shared platform components owned by **air-infra** (`../air-infra`). All three of these dependencies
+shared platform components owned by **air-infra** (the short name of `../air-infrastructure-service`). All three of these dependencies
 are optional — a bare checkout with nothing configured still boots and serves on a two-rung ladder
 (T0 + T1's lexicon fallback); `make doctor` reports what's reachable.
 
