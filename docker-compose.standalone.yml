@@ -1,0 +1,33 @@
+# Standalone local run: this service without air-infra's shared stack.
+#
+# Layered on top of docker-compose.yml, never used on its own:
+#
+#   make up INFRA=none
+#   docker compose -f docker-compose.yml -f docker-compose.standalone.yml up -d --build
+#
+# docker-compose.yml joins air-infra's `air-net` network as `external` on
+# purpose, so a missing shared stack is a loud failure rather than a container
+# that boots healthy and then times out on Redis. That is the right default
+# when the whole platform runs on one laptop. When you only want this service
+# (plus air-model-gateway, which is reached over the host and was never on
+# air-net), this file swaps two things and nothing else:
+#
+# - The network becomes this project's own bridge, created and removed by
+#   compose, instead of the external `air-net`.
+# - The verdict cache moves in-process (`memory`), because the `redis` host
+#   name only resolves on air-net. A cache miss is still a correct answer, so
+#   this costs repeat-request latency, not correctness; idempotency keys and
+#   quotas are per-container rather than shared, which only matters with more
+#   than one replica.
+#
+# Production never uses either compose file.
+
+services:
+  air-classifier-service:
+    environment:
+      AIR_CLASSIFIER__CACHE__BACKEND: memory
+
+networks:
+  default:
+    name: air-classifier-service-net
+    external: false
